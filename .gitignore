@@ -1,0 +1,28 @@
+# === FILES THAT SHOULD NEVER BE PUSHED TO GITHUB ===
+
+# Your secret API keys and tokens
+.env
+
+# The database file (created at runtime, not needed in git)
+quil.db
+
+# Python cache files (auto-generated, not code)
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment (installed packages, not your code)
+venv/
+.venv/
+env/
+
+# IDE settings (personal editor configuration)
+.vscode/
+.idea/
+
+# OS files (system junk)
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log

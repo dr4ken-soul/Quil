@@ -1,0 +1,157 @@
+{
+  "description": "Historical crime coin pattern database. Compiled from confirmed crime pump case studies.",
+  "version": "1.0.0",
+  "case_studies": {
+    "RAVE": {
+      "chain": "ethereum",
+      "confirmed_crime_pump": true,
+      "pre_pump_signals": {
+        "supply_concentration": "Over 90% supply held by coordinated wallets",
+        "oi_to_mcap_ratio": "Elevated above 0.5 before the pump",
+        "funding_rate": "Pushed to -2% per 4h period during operation",
+        "stage_three_trap": "OI dropped with volume spike and temporary price dip, shorts entered, price then reversed sharply trapping all new shorts",
+        "exchange_concentration": "Primary operations on exchanges with weak risk controls"
+      },
+      "key_pattern": "The $RAVE model is the reference case for Stage Three trap detection. Market makers closed shorts and unwound hedges to create a drop in OI with a price drop and increased volume. This made the move appear exhausted. Short sellers entered. Price then reversed and continued higher.",
+      "estimated_market_maker_profit_usd": 30000000,
+      "profit_split": "70% market maker, 30% project"
+    },
+    "STO": {
+      "chain": "ethereum",
+      "confirmed_crime_pump": true,
+      "pre_pump_signals": {
+        "supply_concentration": "High wallet concentration before pump",
+        "volume_spike": "Volume spiked without news catalyst",
+        "coordination": "Coordinated buy transactions from newly funded wallets"
+      }
+    },
+    "ORDI": {
+      "chain": "bitcoin",
+      "confirmed_crime_pump": true,
+      "pre_pump_signals": {
+        "oi_to_mcap_ratio": "Very high OI relative to market cap",
+        "funding_rate": "Deeply negative funding before major moves",
+        "liquidation_cascades": "Massive short liquidation events"
+      }
+    },
+    "IP": {
+      "chain": "ethereum",
+      "confirmed_crime_pump": true,
+      "pre_pump_signals": {
+        "supply_concentration": "Concentrated supply in few wallets",
+        "exchange_distribution": "Low exchange balances making spot easy to move",
+        "price_suppression": "Extended flat period before vertical move"
+      }
+    },
+    "SIREN": {
+      "chain": "ethereum",
+      "confirmed_crime_pump": true,
+      "pre_pump_signals": {
+        "market_maker_coordination": "Active market maker with profit sharing agreement",
+        "supply_control": "Over 90% supply accumulated before operations",
+        "weak_exchange_operations": "Primary operations on Bitget and Gate"
+      },
+      "estimated_market_maker_profit_usd": 30000000
+    },
+    "MYX": {
+      "chain": "ethereum",
+      "confirmed_crime_pump": true,
+      "pre_pump_signals": {
+        "market_maker_coordination": "Active market maker with token lending agreement",
+        "cold_wallet_withdrawals": "Large withdrawals from exchange cold wallets",
+        "oi_manipulation": "OI inflated through hedged positions",
+        "distribution_phase": "Clear Stage Four distribution with funding at -2%"
+      },
+      "estimated_market_maker_profit_usd": 30000000,
+      "key_pattern": "MYX demonstrated clear four-stage lifecycle progression with active market maker involvement. Cold wallet withdrawal detection would have flagged the preparation phase."
+    },
+    "COAI": {
+      "chain": "ethereum",
+      "confirmed_crime_pump": true,
+      "pre_pump_signals": {
+        "supply_concentration": "Over 90% controlled supply",
+        "weak_exchange_operations": "Primary operations on exchanges with weak risk controls",
+        "coordinated_social": "Coordinated social media campaign preceding pump"
+      },
+      "estimated_market_maker_profit_usd": 30000000
+    },
+    "AIA": {
+      "chain": "ethereum",
+      "confirmed_crime_pump": true,
+      "pre_pump_signals": {
+        "market_maker_coordination": "Active market maker arrangement",
+        "supply_control": "Multisig wallets controlling majority supply",
+        "funding_extraction": "Negative funding used as profit extraction mechanism"
+      },
+      "estimated_market_maker_profit_usd": 30000000
+    }
+  },
+  "common_patterns_ranked": [
+    {
+      "rank": 1,
+      "signal": "Supply concentration above 90% in coordinated wallets",
+      "prevalence": "8/8 cases",
+      "detection_layer": 1
+    },
+    {
+      "rank": 2,
+      "signal": "Operations concentrated on exchanges with weak risk controls (Bitget, Gate, Aster)",
+      "prevalence": "7/8 cases",
+      "detection_layer": 2
+    },
+    {
+      "rank": 3,
+      "signal": "Deeply negative funding rate (-1.5% to -2% per 4h period)",
+      "prevalence": "7/8 cases",
+      "detection_layer": 3
+    },
+    {
+      "rank": 4,
+      "signal": "High OI-to-market-cap ratio (above 0.5)",
+      "prevalence": "6/8 cases",
+      "detection_layer": 2
+    },
+    {
+      "rank": 5,
+      "signal": "Stage Three trap pattern (OI drop + volume spike + price dip + reversal)",
+      "prevalence": "6/8 cases",
+      "detection_layer": "2+4"
+    },
+    {
+      "rank": 6,
+      "signal": "Cold wallet withdrawals from exchanges before pump",
+      "prevalence": "5/8 cases",
+      "detection_layer": 1
+    },
+    {
+      "rank": 7,
+      "signal": "Coordinated social media push with new/reactivated accounts",
+      "prevalence": "5/8 cases",
+      "detection_layer": "social"
+    },
+    {
+      "rank": 8,
+      "signal": "Volume spike without news catalyst",
+      "prevalence": "5/8 cases",
+      "detection_layer": 4
+    },
+    {
+      "rank": 9,
+      "signal": "Active market maker with token lending or profit sharing agreement",
+      "prevalence": "5/8 cases",
+      "detection_layer": 1
+    },
+    {
+      "rank": 10,
+      "signal": "Exchange deposit/withdrawal suspensions isolating the market",
+      "prevalence": "4/8 cases",
+      "detection_layer": 2
+    }
+  ],
+  "detection_model_rules": {
+    "minimum_layers_for_confirmed_alert": 2,
+    "single_layer_alert_type": "watch",
+    "stage_three_requires": ["OI drop", "volume spike", "price dip", "funding below -1.5%"],
+    "highest_confidence_combo": "2+ layers triggered AND trap bot T2 Stop Sweep detected"
+  }
+}
