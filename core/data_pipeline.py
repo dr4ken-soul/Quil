@@ -65,14 +65,20 @@ class DataPipeline:
         """
         Build a complete Token profile from all available data sources.
 
+        Price priority: Bybit (real-time) → CoinGecko (CEX aggregate) → DexScreener (DEX)
         query can be a ticker symbol or contract address.
         """
         log.info("building_token_profile", query=query)
 
-        # Step 1: Try CoinGecko first for accurate CEX prices
-        coingecko_price = await self._get_coingecko_price(query)
+        # Step 1: Try exchange APIs for the most accurate real-time price
+        # Priority: Bybit → CoinGecko → DexScreener
+        exchange_price = await self._get_bybit_price(query)
+        if not exchange_price:
+            exchange_price = await self._get_coingecko_price(query)
 
-        # Step 2: Get data from DexScreener
+        price_source = "bybit" if exchange_price else "pending"
+
+        # Step 2: Get data from DexScreener (for metadata, volume, liquidity)
         pairs = await self.dexscreener.search_tokens(query)
         if not pairs:
             # Try as direct token address
@@ -90,8 +96,12 @@ class DataPipeline:
         chain_id = metrics.get("chain", "").lower()
         chain = CHAIN_MAP.get(chain_id)
 
-        # Use CoinGecko price if available (more accurate for CEX-listed tokens)
-        price = coingecko_price if coingecko_price else metrics["price"]
+        # Use exchange price if available (most accurate), else DexScreener
+        if exchange_price:
+            price = exchange_price
+        else:
+            price = metrics["price"]
+            price_source = "dexscreener"
 
         token = Token(
             symbol=metrics["symbol"],
@@ -121,9 +131,66 @@ class DataPipeline:
         token.last_updated = datetime.utcnow()
         log.info("token_profile_built", symbol=token.symbol,
                 price=token.metrics.price, mcap=token.metrics.market_cap,
-                source="coingecko" if coingecko_price else "dexscreener")
+                source=price_source)
 
         return token
+
+    async def _get_bybit_price(self, query: str) -> Optional[float]:
+        """
+        Get real-time price from Bybit public API.
+        No API key needed. Tries both spot and perpetual markets.
+        """
+        import aiohttp
+
+        ticker = query.upper().replace("$", "")
+
+        # Skip contract addresses
+        if len(ticker) > 10 or ticker.startswith("0X"):
+            return None
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Try spot market first (TOKEN/USDT)
+                symbol = f"{ticker}USDT"
+                url = "https://api.bybit.com/v5/market/tickers"
+
+                async with session.get(
+                    url,
+                    params={"category": "spot", "symbol": symbol},
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        result = data.get("result", {})
+                        tickers = result.get("list", [])
+                        if tickers:
+                            price = float(tickers[0].get("lastPrice", 0))
+                            if price > 0:
+                                log.info("bybit_price", symbol=ticker, price=price,
+                                        market="spot")
+                                return price
+
+                # Fallback: try perpetual/futures
+                async with session.get(
+                    url,
+                    params={"category": "linear", "symbol": symbol},
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        result = data.get("result", {})
+                        tickers = result.get("list", [])
+                        if tickers:
+                            price = float(tickers[0].get("lastPrice", 0))
+                            if price > 0:
+                                log.info("bybit_price", symbol=ticker, price=price,
+                                        market="linear")
+                                return price
+
+        except Exception as e:
+            log.warning("bybit_price_failed", symbol=ticker, error=str(e))
+
+        return None
 
     async def _get_coingecko_price(self, query: str) -> Optional[float]:
         """
