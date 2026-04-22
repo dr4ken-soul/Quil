@@ -256,16 +256,38 @@ async def get_recent_alerts(hours: int = 24, limit: int = 50) -> list[dict]:
 
 
 async def add_to_watchlist(token_symbol: str, contract_address: str = None,
-                           chain: str = None, reason: str = None) -> int:
-    """Add a token to the monitoring watchlist."""
+                           chain: str = None, reason: str = None) -> dict:
+    """Add a token to the monitoring watchlist. Returns status dict."""
     async with aiosqlite.connect(DB_PATH) as db:
+        # Check if token already exists in watchlist
+        cursor = await db.execute("""
+            SELECT id, active FROM token_watchlist
+            WHERE UPPER(token_symbol) = UPPER(?)
+        """, (token_symbol,))
+        existing = await cursor.fetchone()
+
+        if existing:
+            row_id, is_active = existing
+            if is_active:
+                # Already in watchlist and active
+                return {"status": "already_exists", "id": row_id}
+            else:
+                # Was deactivated, reactivate it
+                await db.execute("""
+                    UPDATE token_watchlist SET active = 1 WHERE id = ?
+                """, (row_id,))
+                await db.commit()
+                log.info("watchlist_reactivated", token=token_symbol)
+                return {"status": "reactivated", "id": row_id}
+
+        # New token — insert
         cursor = await db.execute("""
             INSERT INTO token_watchlist (token_symbol, contract_address, chain, reason)
             VALUES (?, ?, ?, ?)
         """, (token_symbol, contract_address, chain, reason))
         await db.commit()
         log.info("watchlist_added", token=token_symbol)
-        return cursor.lastrowid
+        return {"status": "added", "id": cursor.lastrowid}
 
 
 async def get_active_watchlist() -> list[dict]:

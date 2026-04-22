@@ -341,11 +341,23 @@ async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     contract = context.args[1] if len(context.args) > 1 else None
 
     try:
-        await add_to_watchlist(ticker, contract_address=contract, reason="User added")
-        await update.message.reply_text(
-            f"${ticker} added to the monitoring watchlist. "
-            f"The bot will continuously scan for crime pump signals."
-        )
+        result = await add_to_watchlist(ticker, contract_address=contract, reason="User added")
+
+        if result["status"] == "already_exists":
+            await update.message.reply_text(
+                f"${ticker} is already in the watchlist. "
+                f"Use /watchlist to view all monitored tokens."
+            )
+        elif result["status"] == "reactivated":
+            await update.message.reply_text(
+                f"${ticker} re-added to the monitoring watchlist. "
+                f"Crime pump scanning resumed."
+            )
+        else:
+            await update.message.reply_text(
+                f"${ticker} added to the monitoring watchlist. "
+                f"The bot will continuously scan for crime pump signals."
+            )
     except Exception as e:
         log.error("watchlist_add_error", ticker=ticker, error=str(e))
         await update.message.reply_text(f"Error adding to watchlist: {str(e)[:200]}")
@@ -479,9 +491,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif data.startswith("watchlist_add:"):
         token_symbol = data.split(":", 1)[1]
         try:
-            await add_to_watchlist(token_symbol, reason="Added via button")
+            result = await add_to_watchlist(token_symbol, reason="Added via button")
+            if result["status"] == "already_exists":
+                msg = f"\n\n⚠️ ${token_symbol} is already in the watchlist"
+            elif result["status"] == "reactivated":
+                msg = f"\n\n✅ ${token_symbol} re-added to watchlist"
+            else:
+                msg = f"\n\n✅ ${token_symbol} added to watchlist"
             await query.edit_message_text(
-                query.message.text + f"\n\n✅ ${token_symbol} added to watchlist",
+                query.message.text + msg,
                 reply_markup=query.message.reply_markup,
             )
         except Exception as e:
