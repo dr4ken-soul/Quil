@@ -128,54 +128,67 @@ class DataPipeline:
     async def _get_coingecko_price(self, query: str) -> Optional[float]:
         """
         Get accurate price from CoinGecko for CEX-listed tokens.
-        This is more reliable than DexScreener for major tokens.
+
+        Uses dynamic search — no hardcoded mapping needed.
+        Searches CoinGecko by symbol, picks the highest-ranked result,
+        then fetches the current price.
         """
         import aiohttp
-
-        # Map tickers to CoinGecko IDs
-        symbol_map = {
-            "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
-            "DOGE": "dogecoin", "PEPE": "pepe", "WIF": "dogwifcoin",
-            "BONK": "bonk", "RAVE": "ravedao", "STO": "stormx",
-            "ORDI": "ordinals", "IP": "story-protocol",
-            "AVAX": "avalanche-2", "LINK": "chainlink",
-            "ADA": "cardano", "DOT": "polkadot", "MATIC": "matic-network",
-            "ARB": "arbitrum", "OP": "optimism", "SUI": "sui",
-            "APT": "aptos", "SEI": "sei-network", "INJ": "injective-protocol",
-            "TIA": "celestia", "JUP": "jupiter-exchange-solana",
-            "RENDER": "render-token", "FET": "fetch-ai",
-            "NEAR": "near", "FIL": "filecoin", "ATOM": "cosmos",
-            "XRP": "ripple", "BNB": "binancecoin",
-            "TRUMP": "official-trump", "ZAMA": "zama",
-            "HBAR": "hedera-hashgraph", "UNI": "uniswap",
-            "AAVE": "aave", "MKR": "maker", "LDO": "lido-dao",
-            "CRV": "curve-dao-token", "SNX": "havven",
-        }
 
         ticker = query.upper().replace("$", "")
 
         # Skip contract addresses — CoinGecko uses IDs not addresses
-        if len(ticker) > 10 or ticker.startswith("0X"):
+        if len(ticker) > 42 or ticker.startswith("0X"):
             return None
 
-        coin_id = symbol_map.get(ticker)
-        if not coin_id:
-            # Try lowercase ticker as fallback
-            coin_id = ticker.lower()
-
         try:
-            url = f"https://api.coingecko.com/api/v3/simple/price"
-            params = {"ids": coin_id, "vs_currencies": "usd"}
-
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params,
-                                      timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                # Step 1: Search CoinGecko for the token by symbol
+                search_url = "https://api.coingecko.com/api/v3/search"
+                async with session.get(
+                    search_url,
+                    params={"query": ticker},
+                    timeout=aiohttp.ClientTimeout(total=8),
+                ) as resp:
+                    if resp.status != 200:
+                        return None
+                    search_data = await resp.json()
+
+                coins = search_data.get("coins", [])
+                if not coins:
+                    return None
+
+                # Step 2: Find the best match — same symbol + highest rank
+                # CoinGecko returns results sorted by market cap rank
+                coin_id = None
+                for coin in coins:
+                    coin_symbol = coin.get("symbol", "").upper()
+                    if coin_symbol == ticker:
+                        coin_id = coin.get("id")
+                        break  # First match with exact symbol = highest ranked
+
+                if not coin_id:
+                    # No exact symbol match, use first result
+                    coin_id = coins[0].get("id")
+
+                if not coin_id:
+                    return None
+
+                # Step 3: Get the price
+                price_url = "https://api.coingecko.com/api/v3/simple/price"
+                async with session.get(
+                    price_url,
+                    params={"ids": coin_id, "vs_currencies": "usd"},
+                    timeout=aiohttp.ClientTimeout(total=8),
+                ) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         if coin_id in data and "usd" in data[coin_id]:
                             price = data[coin_id]["usd"]
-                            log.info("coingecko_price", symbol=ticker, price=price)
+                            log.info("coingecko_price",
+                                    symbol=ticker, coin_id=coin_id, price=price)
                             return float(price)
+
         except Exception as e:
             log.warning("coingecko_price_failed", symbol=ticker, error=str(e))
 

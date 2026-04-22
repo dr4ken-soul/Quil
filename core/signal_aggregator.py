@@ -52,6 +52,9 @@ class SignalAggregator:
         self._freqtrade = None
         self._octobot = None
         self._chart_analyzer = None
+        # Direction memory — prevents flip-flopping between LONG/SHORT
+        # Stores {symbol: (direction, timestamp)} for recent signals
+        self._direction_cache: dict[str, tuple] = {}
 
         # Load chart analysis engine
         try:
@@ -661,24 +664,45 @@ class SignalAggregator:
             else:
                 return Direction.SHORT, 0.30
 
-        # Require meaningful difference to pick direction
-        # If scores are within 10% of each other, go with momentum
-        diff = abs(bull_score - bear_score) / total
-        if diff < 0.1:
-            # Too close to call — use price momentum as tiebreaker
-            if token.metrics.price_change_1h > 0:
-                return Direction.LONG, 0.45
-            elif token.metrics.price_change_1h < 0:
-                return Direction.SHORT, 0.45
-            else:
-                return Direction.LONG, 0.35  # True tie, slight lean
-
+        # Determine raw direction
         if bull_score > bear_score:
+            new_direction = Direction.LONG
             confidence = bull_score / total
-            return Direction.LONG, confidence
-        else:
+        elif bear_score > bull_score:
+            new_direction = Direction.SHORT
             confidence = bear_score / total
-            return Direction.SHORT, confidence
+        else:
+            # Exact tie — use momentum
+            if token.metrics.price_change_1h >= 0:
+                new_direction = Direction.LONG
+            else:
+                new_direction = Direction.SHORT
+            confidence = 0.50
+
+        # Direction stickiness — prevent flip-flopping
+        # If we recently called a direction for this token,
+        # require a stronger signal (20% margin) to change it
+        symbol = token.symbol
+        diff = abs(bull_score - bear_score) / total if total > 0 else 0
+
+        if symbol in self._direction_cache:
+            cached_dir, cached_time = self._direction_cache[symbol]
+            # Only flip direction if the new signal is meaningfully stronger
+            if new_direction != cached_dir and diff < 0.20:
+                # Not strong enough to flip — keep previous direction
+                new_direction = cached_dir
+                confidence = 0.45  # Lower confidence since we're sticking
+
+        # Update cache with current direction
+        self._direction_cache[symbol] = (new_direction, datetime.now(timezone.utc))
+
+        # Clean old cache entries (keep last 20)
+        if len(self._direction_cache) > 20:
+            oldest = sorted(self._direction_cache.items(), key=lambda x: x[1][1])
+            for key, _ in oldest[:5]:
+                del self._direction_cache[key]
+
+        return new_direction, confidence
 
     def _calculate_confidence(
         self,
