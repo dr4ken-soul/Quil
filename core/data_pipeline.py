@@ -69,7 +69,10 @@ class DataPipeline:
         """
         log.info("building_token_profile", query=query)
 
-        # Step 1: Get basic data from DexScreener
+        # Step 1: Try CoinGecko first for accurate CEX prices
+        coingecko_price = await self._get_coingecko_price(query)
+
+        # Step 2: Get data from DexScreener
         pairs = await self.dexscreener.search_tokens(query)
         if not pairs:
             # Try as direct token address
@@ -87,6 +90,9 @@ class DataPipeline:
         chain_id = metrics.get("chain", "").lower()
         chain = CHAIN_MAP.get(chain_id)
 
+        # Use CoinGecko price if available (more accurate for CEX-listed tokens)
+        price = coingecko_price if coingecko_price else metrics["price"]
+
         token = Token(
             symbol=metrics["symbol"],
             name=metrics.get("name"),
@@ -95,7 +101,7 @@ class DataPipeline:
             pair_address=metrics.get("pair_address"),
             dex=metrics.get("dex"),
             metrics=TokenMetrics(
-                price=metrics["price"],
+                price=price,
                 market_cap=metrics["market_cap"],
                 volume_24h=metrics["volume_24h"],
                 volume_1h=metrics["volume_1h"],
@@ -106,17 +112,74 @@ class DataPipeline:
             ),
         )
 
-        # Step 2: Enrich with derivatives data (Coinglass)
+        # Step 3: Enrich with derivatives data (Coinglass)
         await self._enrich_derivatives(token)
 
-        # Step 3: Enrich with on-chain data
+        # Step 4: Enrich with on-chain data
         await self._enrich_onchain(token)
 
         token.last_updated = datetime.utcnow()
         log.info("token_profile_built", symbol=token.symbol,
-                price=token.metrics.price, mcap=token.metrics.market_cap)
+                price=token.metrics.price, mcap=token.metrics.market_cap,
+                source="coingecko" if coingecko_price else "dexscreener")
 
         return token
+
+    async def _get_coingecko_price(self, query: str) -> Optional[float]:
+        """
+        Get accurate price from CoinGecko for CEX-listed tokens.
+        This is more reliable than DexScreener for major tokens.
+        """
+        import aiohttp
+
+        # Map tickers to CoinGecko IDs
+        symbol_map = {
+            "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
+            "DOGE": "dogecoin", "PEPE": "pepe", "WIF": "dogwifcoin",
+            "BONK": "bonk", "RAVE": "rave-token", "STO": "stormx",
+            "ORDI": "ordinals", "IP": "story-protocol",
+            "AVAX": "avalanche-2", "LINK": "chainlink",
+            "ADA": "cardano", "DOT": "polkadot", "MATIC": "matic-network",
+            "ARB": "arbitrum", "OP": "optimism", "SUI": "sui",
+            "APT": "aptos", "SEI": "sei-network", "INJ": "injective-protocol",
+            "TIA": "celestia", "JUP": "jupiter-exchange-solana",
+            "RENDER": "render-token", "FET": "fetch-ai",
+            "NEAR": "near", "FIL": "filecoin", "ATOM": "cosmos",
+            "XRP": "ripple", "BNB": "binancecoin",
+            "TRUMP": "official-trump", "ZAMA": "zama",
+            "HBAR": "hedera-hashgraph", "UNI": "uniswap",
+            "AAVE": "aave", "MKR": "maker", "LDO": "lido-dao",
+            "CRV": "curve-dao-token", "SNX": "havven",
+        }
+
+        ticker = query.upper().replace("$", "")
+
+        # Skip contract addresses — CoinGecko uses IDs not addresses
+        if len(ticker) > 10 or ticker.startswith("0X"):
+            return None
+
+        coin_id = symbol_map.get(ticker)
+        if not coin_id:
+            # Try lowercase ticker as fallback
+            coin_id = ticker.lower()
+
+        try:
+            url = f"https://api.coingecko.com/api/v3/simple/price"
+            params = {"ids": coin_id, "vs_currencies": "usd"}
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params,
+                                      timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if coin_id in data and "usd" in data[coin_id]:
+                            price = data[coin_id]["usd"]
+                            log.info("coingecko_price", symbol=ticker, price=price)
+                            return float(price)
+        except Exception as e:
+            log.warning("coingecko_price_failed", symbol=ticker, error=str(e))
+
+        return None
 
     async def _enrich_derivatives(self, token: Token) -> None:
         """Enrich token with derivatives data from Coinglass."""
