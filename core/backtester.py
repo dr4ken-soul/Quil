@@ -333,7 +333,7 @@ class BacktestEngine:
         symbol_map = {
             "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
             "DOGE": "dogecoin", "PEPE": "pepe", "WIF": "dogwifcoin",
-            "BONK": "bonk", "RAVE": "rave", "STO": "stormx",
+            "BONK": "bonk", "RAVE": "ravedao", "STO": "stormx",
             "ORDI": "ordinals", "IP": "story-protocol",
             "AVAX": "avalanche-2", "LINK": "chainlink",
             "ADA": "cardano", "DOT": "polkadot", "MATIC": "matic-network",

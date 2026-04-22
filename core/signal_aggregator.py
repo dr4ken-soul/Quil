@@ -636,17 +636,44 @@ class SignalAggregator:
                 bear_score += 0.15
 
         # === TECHNICAL SIGNAL WEIGHTS ===
+        # Check name, observation, AND significance for direction cues
         for sig in tech_signals:
-            if "bullish" in sig.name.lower() or "bottom" in sig.name.lower():
-                bull_score += sig.weight * 0.15
-            elif "bearish" in sig.name.lower() or "top" in sig.name.lower():
-                bear_score += sig.weight * 0.15
+            sig_text = f"{sig.name} {sig.observation} {sig.significance}".lower()
+            is_bullish = any(w in sig_text for w in [
+                "bullish", "bottom", "bounce", "oversold", "support",
+                "hammer", "morning star", "three white", "upward",
+            ])
+            is_bearish = any(w in sig_text for w in [
+                "bearish", "top", "overbought", "resistance", "pull back",
+                "shooting star", "evening star", "three black", "downward",
+            ])
+
+            if is_bullish and not is_bearish:
+                bull_score += sig.weight * 0.25
+            elif is_bearish and not is_bullish:
+                bear_score += sig.weight * 0.25
 
         total = bull_score + bear_score
         if total == 0:
-            return Direction.LONG, 0.5
+            # No data at all — low confidence, use 1h change as tiebreaker
+            if token.metrics.price_change_1h >= 0:
+                return Direction.LONG, 0.30
+            else:
+                return Direction.SHORT, 0.30
 
-        if bull_score >= bear_score:
+        # Require meaningful difference to pick direction
+        # If scores are within 10% of each other, go with momentum
+        diff = abs(bull_score - bear_score) / total
+        if diff < 0.1:
+            # Too close to call — use price momentum as tiebreaker
+            if token.metrics.price_change_1h > 0:
+                return Direction.LONG, 0.45
+            elif token.metrics.price_change_1h < 0:
+                return Direction.SHORT, 0.45
+            else:
+                return Direction.LONG, 0.35  # True tie, slight lean
+
+        if bull_score > bear_score:
             confidence = bull_score / total
             return Direction.LONG, confidence
         else:
@@ -842,7 +869,7 @@ class SignalAggregator:
                 "observation": f"Top 10 wallets hold {token.onchain.top10_wallet_pct:.1f}%",
             })
 
-        if token.onchain.contract_age_days is not None and token.onchain.contract_age_days < 30:
+        if token.onchain.contract_age_days is not None and token.onchain.contract_age_days > 0 and token.onchain.contract_age_days < 30:
             signals.append({
                 "name": "Young Contract",
                 "observation": f"Contract is {token.onchain.contract_age_days} days old",
