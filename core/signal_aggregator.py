@@ -658,11 +658,18 @@ class SignalAggregator:
 
         total = bull_score + bear_score
         if total == 0:
-            # No data at all — low confidence, use 1h change as tiebreaker
-            if token.metrics.price_change_1h >= 0:
+            # No data at all — check if we have ANY price change data
+            change_1h = token.metrics.price_change_1h
+            if change_1h > 1:
                 return Direction.LONG, 0.30
-            else:
+            elif change_1h < -1:
                 return Direction.SHORT, 0.30
+            else:
+                # Truly neutral — still pick based on tiny change but very low confidence
+                if change_1h >= 0:
+                    return Direction.LONG, 0.25
+                else:
+                    return Direction.SHORT, 0.25
 
         # Determine raw direction
         if bull_score > bear_score:
@@ -812,16 +819,31 @@ class SignalAggregator:
         sl_pct = max(sl_pct, 1.5)   # Minimum 1.5% stop
         sl_pct = min(sl_pct, 15.0)  # Maximum 15% stop
 
+        # Dynamic R:R based on confidence
+        # Higher confidence = more aggressive TP = better R:R
+        if confidence >= 0.7:
+            tp1_mult = 3.0    # 3:1 R:R
+            tp2_mult = 5.0    # 5:1 R:R
+        elif confidence >= 0.5:
+            tp1_mult = 2.5    # 2.5:1 R:R
+            tp2_mult = 4.0    # 4:1 R:R
+        elif confidence >= 0.4:
+            tp1_mult = 2.2    # 2.2:1 R:R
+            tp2_mult = 3.5    # 3.5:1 R:R
+        else:
+            tp1_mult = 2.0    # 2:1 R:R (conservative for low confidence)
+            tp2_mult = 3.0    # 3:1 R:R
+
         if direction == Direction.LONG:
             stop_loss = entry * (1 - sl_pct / 100)
-            tp1 = entry * (1 + sl_pct * 2 / 100)    # 2:1 R:R
-            tp2 = entry * (1 + sl_pct * 3.5 / 100)  # 3.5:1 R:R
+            tp1 = entry * (1 + sl_pct * tp1_mult / 100)
+            tp2 = entry * (1 + sl_pct * tp2_mult / 100)
         else:
             stop_loss = entry * (1 + sl_pct / 100)
-            tp1 = entry * (1 - sl_pct * 2 / 100)
-            tp2 = entry * (1 - sl_pct * 3.5 / 100)
+            tp1 = entry * (1 - sl_pct * tp1_mult / 100)
+            tp2 = entry * (1 - sl_pct * tp2_mult / 100)
 
-        risk_reward = 2.0
+        risk_reward = tp1_mult
 
         # Leverage — based on confidence and volatility
         if confidence >= 0.7 and volatility < 5:

@@ -91,15 +91,26 @@ class TrackedPosition:
         self.realized_pnl: float = 0.0
 
     def _calc_liquidation_price(self) -> float:
-        """Estimate liquidation price based on leverage."""
+        """Estimate liquidation price based on leverage (Bybit-style formula).
+        Uses 2.5% maintenance margin rate which matches Bybit's rate for
+        small-cap and Innovation Zone altcoins. BTC/ETH use lower rates,
+        but since the user primarily trades altcoins, 2.5% is more accurate.
+        """
         if self.leverage <= 1 or self.entry_price <= 0:
             return 0.0
 
-        liq_distance = self.entry_price / self.leverage
+        # Bybit maintenance margin rate for small-cap/Innovation Zone altcoins
+        maintenance_margin_rate = 0.025  # 2.5%
+        taker_fee = 0.0006  # 0.06%
+
+        initial_margin_rate = 1.0 / self.leverage
+
         if self.direction == "LONG":
-            return max(self.entry_price - liq_distance, 0)
+            liq = self.entry_price * (1 - initial_margin_rate + maintenance_margin_rate + taker_fee)
+            return max(liq, 0)
         else:
-            return self.entry_price + liq_distance
+            liq = self.entry_price * (1 + initial_margin_rate - maintenance_margin_rate - taker_fee)
+            return liq
 
     @property
     def pnl_pct(self) -> float:
