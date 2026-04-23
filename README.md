@@ -1,6 +1,6 @@
-# Quil - Crime Pump Detection & Trading Analysis Bot
+# Quil - Crime Pump Detection & Trading Bot
 
-Autonomous crypto trading bot with a four-layer crime pump detection system, expert-level technical analysis, dual-mode backtesting, and real-time position monitoring. Features Bybit real-time price feeds, 8 candlestick pattern recognition, and support/resistance detection.
+Autonomous crypto trading bot with a four-layer crime pump detection system, expert-level technical analysis, dual-mode backtesting, real-time position monitoring, and live/paper trade execution via Bybit. Features Supabase PostgreSQL for persistent data, Bybit real-time price feeds, 8 candlestick pattern recognition, and support/resistance detection.
 
 ## Build Status
 
@@ -17,17 +17,23 @@ Autonomous crypto trading bot with a four-layer crime pump detection system, exp
 | 9 | Position monitoring & alerts (TP/SL/liquidation/custom) | ✅ Complete |
 | 10 | Backtesting engine (Trade + Crime Pump modes) | ✅ Complete |
 | 10.5 | Expert chart analysis + Bybit price pipeline + bug fixes | ✅ Complete |
+| 11 | Live execution (Execute Trade button + /sell + paper/live mode) | ✅ Complete |
+| 11.5 | Supabase PostgreSQL + position tracking fix | ✅ Complete |
 | — | **Deployed on Railway (24/7)** | ✅ Live |
-| 11 | Live execution (Execute Trade button + /sell) | ❌ Next |
-| 12 | Performance dashboard (/stats) | ❌ After 11 |
+| 12 | Performance dashboard (/stats) | ❌ Next |
 
-## Two Main Features
+## Three Main Features
 
 ### 1. Crime Pump Detection
 Scans the market continuously for coordinated manipulation across 4 detection layers (on-chain supply, perp/index manipulation, funding rate dynamics, order book manipulation). Classifies tokens into lifecycle stages (accumulation → OI matrix → trap → distribution).
 
 ### 2. Trading Analysis
 Expert-level technical analysis engine that reads charts independently. Uses RSI, EMA Crossovers, MACD, Bollinger Bands, 8 candlestick patterns, and support/resistance levels to generate trade signals with direction (Long/Short), entry, SL, TP1, TP2, leverage, and position sizing. Crime pump detection is a **warning overlay only** — it does not drive trade direction.
+
+### 3. Trade Execution
+Dual-mode trade execution system:
+- **Paper Mode (default):** Simulated trades — logs signals, tracks positions with live PnL, sends TP/SL alerts. No real money involved.
+- **Live Mode:** Places real market orders on Bybit via CCXT with automatic leverage setting, conditional SL/TP orders, and position tracking. Requires a two-step confirmation (Execute → Confirm) to prevent accidental trades.
 
 ## Price Pipeline
 
@@ -43,7 +49,7 @@ Token Price Resolution (priority order):
 | Command | What It Does |
 |---------|-------------|
 | `/scan [ticker]` | Crime pump analysis (4 detection layers) |
-| `/trade [ticker]` | Full trade analysis with entry/SL/TP/leverage |
+| `/trade [ticker]` | Full trade analysis with entry/SL/TP/leverage + Execute button |
 | `/analyze [ticker]` | Alias for /trade |
 | `/calc [ticker] [amount] [leverage]` | Calculate profit/loss for a trade setup |
 | `/backtest [ticker] [period]` | Trade analysis backtesting |
@@ -51,12 +57,20 @@ Token Price Resolution (priority order):
 | `/track [ticker] [entry] [sl] [tp] [leverage]` | Monitor a position for alerts |
 | `/positions` | View all tracked positions with live PnL |
 | `/close [ticker]` | Stop tracking a position |
+| `/sell [ticker]` | Close a live position on the exchange |
 | `/setalert [ticker] [price]` | Custom price alert |
 | `/watch [ticker]` | Add to continuous monitoring (no duplicates) |
 | `/watchlist` | View monitored tokens |
 | `/alerts` | View recent detections |
 | `/risk` | Portfolio risk status and circuit breaker |
 | `/status` | Data source health check |
+
+### Trade Execution Flow
+1. `/trade ZAMA` → Get analysis with entry, SL, TP, leverage
+2. Click **"✅ Execute Trade"** → See confirmation details
+3. Click **"✅ Confirm & Execute"** → Trade executed (paper or live)
+4. `/positions` → Track position with live PnL updates
+5. `/sell ZAMA` → Close position (live mode) or `/close ZAMA` (stop tracking)
 
 ## Setup
 
@@ -73,18 +87,42 @@ pip install -r requirements.txt
 python main.py
 ```
 
-## Required API Keys
+## Environment Variables
 
-| Service | Required | Purpose |
-|---------|----------|---------|
-| Telegram Bot Token | Yes | Bot interface |
-| Bybit | No (free public API) | Real-time prices |
-| CoinGecko | No (free public API) | Backup prices + historical data |
-| DexScreener | No (free) | DEX data, volume, pairs, metadata |
-| Coinglass | Recommended | OI, funding rates, liquidations |
-| Etherscan | Optional | EVM on-chain data, contract age |
-| Solscan | Optional | Solana on-chain data |
-| Exchange APIs | Optional | Order book data and trade execution |
+### Required
+| Variable | Purpose |
+|----------|---------|
+| `TELEGRAM_BOT_TOKEN` | Telegram bot authentication |
+| `TELEGRAM_CHAT_ID` | Your Telegram chat ID |
+
+### Database (Recommended)
+| Variable | Purpose |
+|----------|---------|
+| `DATABASE_URL` | Supabase PostgreSQL connection string (persistent data) |
+
+### Live Trading (Optional)
+| Variable | Purpose |
+|----------|---------|
+| `TRADING_MODE` | `paper` (default) or `live` |
+| `BYBIT_API_KEY` | Bybit API key (required for live trading) |
+| `BYBIT_SECRET` | Bybit API secret (required for live trading) |
+
+### Market Data (Optional)
+| Variable | Purpose |
+|----------|---------|
+| `COINGLASS_API_KEY` | OI, funding rates, liquidations |
+| `COINGECKO_API_KEY` | Backup prices + historical data |
+| `ETHERSCAN_API_KEY` | EVM on-chain data |
+| `BSCSCAN_API_KEY` | BSC on-chain data |
+| `SOLSCAN_API_KEY` | Solana on-chain data |
+
+### Bot Settings
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `SCAN_INTERVAL_SECONDS` | 30 | Autonomous scan frequency |
+| `ALERT_COOLDOWN_MINUTES` | 15 | Min time between duplicate alerts |
+| `MIN_CONFIDENCE_ALERT` | 0.5 | Minimum confidence to send alert |
+| `MIN_LAYERS_CONFIRMED` | 2 | Min detection layers for alert |
 
 ## Technical Analysis Engine
 
@@ -110,20 +148,27 @@ python main.py
 - Volatility-based stop loss tightening
 - Liquidity-aware position sizing
 - Paper trading mode by default
+- Two-step confirmation for live trades
+
+## Database
+
+Supports two backends:
+- **PostgreSQL (Supabase)** — Recommended. Set `DATABASE_URL` to your Supabase connection string. Data persists across Railway redeploys.
+- **SQLite** — Default fallback for local development. Data is lost on Railway redeploys.
 
 ## Project Structure
 
 ```
 Quil/
 ├── config/              # Settings, exchange configs, thresholds
-├── core/                # Data pipeline, chart analysis, signal aggregator, backtester, execution, risk
+├── core/                # Data pipeline, chart analysis, signal aggregator, backtester, execution, risk, position monitor
 ├── data/                # API clients (DexScreener, Coinglass, explorers, social)
 ├── detection/           # 4 detection layers + lifecycle tracker + orchestrator
 ├── frameworks/          # hl-trap-bot, Freqtrade, Hummingbot, OctoBot adapters
 ├── models/              # Token, Alert, Trade data models
 ├── patterns/            # Historical crime coin pattern database
 ├── telegram_bot/        # Bot interface, handlers, formatters, keyboards
-├── utils/               # Logging, database
+├── utils/               # Logging, database (SQLite + PostgreSQL)
 ├── main.py              # Entry point
 ├── Procfile             # Railway deployment
 └── .gitignore
@@ -131,4 +176,4 @@ Quil/
 
 ## Deployment
 
-Deployed on Railway (~$5/month). Auto-redeploys on every `git push origin main`. Configure environment variables in the Railway dashboard.
+Deployed on Railway (~$5/month). Auto-redeploys on every `git push origin main`. Configure environment variables in the Railway dashboard. Uses Supabase PostgreSQL for persistent data storage.
