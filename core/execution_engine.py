@@ -37,9 +37,11 @@ class ExecutionEngine:
     """
 
     def __init__(self, risk_manager: RiskManager = None,
-                 paper_trading: bool = True):
+                 paper_trading: bool = True,
+                 position_monitor=None):
         self.risk_manager = risk_manager or RiskManager()
         self.paper_trading = paper_trading
+        self.position_monitor = position_monitor
         self._exchanges: dict[str, ccxt.Exchange] = {}
         self._active_orders: dict[str, dict] = {}
         # Stores pending trade signals waiting for user confirmation
@@ -584,7 +586,7 @@ class ExecutionEngine:
     async def _auto_track_position(self, signal: TradeSignal,
                                      exchange_name: str,
                                      fill_price: float = None) -> Optional[int]:
-        """Auto-save the position to database for monitoring."""
+        """Auto-save the position to database AND add to live monitor."""
         try:
             entry = fill_price or signal.risk.entry_price
             lev = signal.risk.leverage if hasattr(signal.risk, 'leverage') else 3
@@ -608,10 +610,24 @@ class ExecutionEngine:
                 "profit_alerts": "[]",
                 "multiplier_alerts": "[]",
                 "custom_price_alerts": "[]",
-                "exchange": exchange_name,
             }
 
+            # Save to database
             position_id = await save_position(position_data)
+
+            # Also add to in-memory position monitor for /positions
+            if self.position_monitor is not None:
+                self.position_monitor.add_position(
+                    symbol=signal.token_symbol,
+                    direction=signal.direction.value.upper(),
+                    entry_price=entry,
+                    stop_loss=signal.risk.stop_loss,
+                    take_profit_1=signal.risk.take_profit_1,
+                    take_profit_2=signal.risk.take_profit_2,
+                    leverage=lev,
+                    size_usd=position_data["size_usd"],
+                )
+
             log.info("position_auto_tracked",
                     symbol=signal.token_symbol, position_id=position_id)
             return position_id

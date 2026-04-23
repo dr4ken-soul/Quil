@@ -48,12 +48,13 @@ class QuilBot:
         self.detector = CrimePumpDetector()
         self.signal_aggregator = SignalAggregator()
         self.risk_manager = RiskManager(portfolio_value_usd=1000.0)
+        self.position_monitor = PositionMonitor(
+            data_pipeline=self.data_pipeline,
+        )
         self.execution_engine = ExecutionEngine(
             risk_manager=self.risk_manager,
             paper_trading=PAPER_TRADING,
-        )
-        self.position_monitor = PositionMonitor(
-            data_pipeline=self.data_pipeline,
+            position_monitor=self.position_monitor,
         )
         self.backtester = BacktestEngine(
             signal_aggregator=self.signal_aggregator,

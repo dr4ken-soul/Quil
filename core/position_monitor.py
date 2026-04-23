@@ -398,7 +398,12 @@ class PositionMonitor:
     async def start_monitoring(self) -> None:
         """Start the background position monitoring loop."""
         self._running = True
-        log.info("position_monitor_started", interval=f"{self._check_interval}s")
+
+        # Load any positions saved in database from previous runs
+        await self._load_from_db()
+
+        log.info("position_monitor_started", interval=f"{self._check_interval}s",
+                loaded=len(self._positions))
 
         while self._running:
             try:
@@ -412,6 +417,37 @@ class PositionMonitor:
         """Stop the monitoring loop."""
         self._running = False
         log.info("position_monitor_stopped")
+
+    async def _load_from_db(self) -> None:
+        """Load open positions from database into memory."""
+        try:
+            positions = await get_active_positions()
+            for p in positions:
+                pos_id = p.get("id", 0)
+                symbol = p.get("symbol", "")
+                # Skip if already loaded
+                if any(pos.symbol == symbol and pos.is_open
+                       for pos in self._positions.values()):
+                    continue
+
+                position = TrackedPosition(
+                    position_id=pos_id,
+                    symbol=symbol,
+                    direction=p.get("direction", "LONG").upper(),
+                    entry_price=p.get("entry_price", 0),
+                    stop_loss=p.get("stop_loss", 0),
+                    take_profit_1=p.get("take_profit_1", 0),
+                    take_profit_2=p.get("take_profit_2", 0),
+                    leverage=p.get("leverage", 1),
+                    size_usd=p.get("size_usd", 0),
+                    liquidation_price=p.get("liquidation_price", 0),
+                )
+                self._positions[f"{symbol}_{pos_id}"] = position
+
+            if positions:
+                log.info("positions_loaded_from_db", count=len(positions))
+        except Exception as e:
+            log.warning("db_position_load_failed", error=str(e))
 
     async def _check_all_positions(self) -> None:
         """Check all active positions against current prices."""
