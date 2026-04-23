@@ -41,6 +41,7 @@ class RiskParameters(BaseModel):
     risk_reward: float = 0.0
     position_size_pct: float = 0.0
     max_loss_usd: float = 0.0
+    leverage: int = 3
 
 
 class TradeSignal(BaseModel):

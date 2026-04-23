@@ -844,6 +844,7 @@ class SignalAggregator:
             risk_reward=round(risk_reward, 1),
             position_size_pct=round(position_pct, 1),
             max_loss_usd=0,
+            leverage=leverage,
         )
 
     def _summarize_market_structure(self, token: Token,
