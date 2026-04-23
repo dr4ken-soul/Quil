@@ -1,13 +1,13 @@
-# Quil - Crime Pump Detection & Trading Bot
+# Quil - Crime Pump Detection & Trading Analysis Bot
 
-Autonomous crypto trading bot with a four-layer crime pump detection system, trade signal generation, position monitoring, and real-time alerts. Monitors DEX activity, derivatives markets, on-chain data, and social signals to detect coordinated manipulation patterns and generate actionable trade recommendations.
+Autonomous crypto trading bot with a four-layer crime pump detection system, expert-level technical analysis, dual-mode backtesting, and real-time position monitoring. Features Bybit real-time price feeds, 8 candlestick pattern recognition, and support/resistance detection.
 
 ## Build Status
 
 | Phase | Feature | Status |
 |-------|---------|--------|
 | 1 | Foundation (config, models, database, logging) | ✅ Complete |
-| 2 | Data layer (DexScreener, Coinglass, explorers, social) | ✅ Complete |
+| 2 | Data layer (Bybit, CoinGecko, DexScreener, Coinglass, explorers) | ✅ Complete |
 | 3 | Crime pump detection (4 layers + lifecycle tracker) | ✅ Complete |
 | 4 | hl-trap-bot 5-gate pipeline | ✅ Complete |
 | 5 | Framework adapters (Freqtrade, Hummingbot, OctoBot) | ✅ Complete |
@@ -15,17 +15,28 @@ Autonomous crypto trading bot with a four-layer crime pump detection system, tra
 | 7 | Telegram bot interface (all commands) | ✅ Complete |
 | 8 | Autonomous market scanning | ✅ Complete |
 | 9 | Position monitoring & alerts (TP/SL/liquidation/custom) | ✅ Complete |
-| 10 | Backtesting engine | ❌ Not built |
-| 11 | Live execution testing | ❌ Not tested |
-| 12 | Performance dashboard | ❌ Not built |
+| 10 | Backtesting engine (Trade + Crime Pump modes) | ✅ Complete |
+| 10.5 | Expert chart analysis + Bybit price pipeline + bug fixes | ✅ Complete |
+| — | **Deployed on Railway (24/7)** | ✅ Live |
+| 11 | Live execution (Execute Trade button + /sell) | ❌ Next |
+| 12 | Performance dashboard (/stats) | ❌ After 11 |
 
-## What It Does
+## Two Main Features
 
-**Crime Pump Detection:** Scans the market continuously for coordinated manipulation across 4 detection layers (on-chain supply, perp/index manipulation, funding rate dynamics, order book manipulation). Classifies tokens into lifecycle stages (accumulation → OI matrix → trap → distribution).
+### 1. Crime Pump Detection
+Scans the market continuously for coordinated manipulation across 4 detection layers (on-chain supply, perp/index manipulation, funding rate dynamics, order book manipulation). Classifies tokens into lifecycle stages (accumulation → OI matrix → trap → distribution).
 
-**Trade Signal Generation:** Combines crime pump detection, trap bot analysis, and technical indicators to generate trade recommendations with direction (Long/Short), entry price, stop loss, take profit levels, leverage (2x-10x), and position size.
+### 2. Trading Analysis
+Expert-level technical analysis engine that reads charts independently. Uses RSI, EMA Crossovers, MACD, Bollinger Bands, 8 candlestick patterns, and support/resistance levels to generate trade signals with direction (Long/Short), entry, SL, TP1, TP2, leverage, and position sizing. Crime pump detection is a **warning overlay only** — it does not drive trade direction.
 
-**Position Monitoring:** Tracks your open positions in real-time and sends Telegram alerts when TP is hit, SL is hit, you're about to be liquidated, or your position reaches profit milestones (50%, 100%, 200%, x2, x5, x10).
+## Price Pipeline
+
+```
+Token Price Resolution (priority order):
+1. Bybit Public API    → Real-time exchange price (no key needed)
+2. CoinGecko Search    → Dynamic symbol search (works for ANY token)
+3. DexScreener         → DEX pool price (fallback for DEX-only tokens)
+```
 
 ## Telegram Commands
 
@@ -35,11 +46,13 @@ Autonomous crypto trading bot with a four-layer crime pump detection system, tra
 | `/trade [ticker]` | Full trade analysis with entry/SL/TP/leverage |
 | `/analyze [ticker]` | Alias for /trade |
 | `/calc [ticker] [amount] [leverage]` | Calculate profit/loss for a trade setup |
+| `/backtest [ticker] [period]` | Trade analysis backtesting |
+| `/backtest [ticker] [period] crime` | Crime pump detection backtesting |
 | `/track [ticker] [entry] [sl] [tp] [leverage]` | Monitor a position for alerts |
 | `/positions` | View all tracked positions with live PnL |
 | `/close [ticker]` | Stop tracking a position |
 | `/setalert [ticker] [price]` | Custom price alert |
-| `/watch [ticker]` | Add to continuous monitoring |
+| `/watch [ticker]` | Add to continuous monitoring (no duplicates) |
 | `/watchlist` | View monitored tokens |
 | `/alerts` | View recent detections |
 | `/risk` | Portfolio risk status and circuit breaker |
@@ -65,13 +78,23 @@ python main.py
 | Service | Required | Purpose |
 |---------|----------|---------|
 | Telegram Bot Token | Yes | Bot interface |
-| DexScreener | No (free) | DEX data, volume, pairs |
+| Bybit | No (free public API) | Real-time prices |
+| CoinGecko | No (free public API) | Backup prices + historical data |
+| DexScreener | No (free) | DEX data, volume, pairs, metadata |
 | Coinglass | Recommended | OI, funding rates, liquidations |
-| Etherscan | Optional | EVM on-chain data |
-| BscScan | Optional | BSC on-chain data |
+| Etherscan | Optional | EVM on-chain data, contract age |
 | Solscan | Optional | Solana on-chain data |
-| Twitter/X | Optional | Social signal monitoring |
 | Exchange APIs | Optional | Order book data and trade execution |
+
+## Technical Analysis Engine
+
+- **RSI** (Relative Strength Index) — overbought/oversold detection
+- **EMA Crossovers** (9/21 period) — trend direction
+- **MACD** — momentum analysis
+- **Bollinger Bands** — volatility and price position
+- **Candlestick Patterns** — Doji, Hammer, Shooting Star, Bullish/Bearish Engulfing, Morning/Evening Star, Three White Soldiers/Black Crows
+- **Support/Resistance Levels** — automated detection from price history
+- **Direction Stickiness** — prevents flip-flopping, needs 20%+ signal strength to change
 
 ## Detection Layers
 
@@ -86,14 +109,14 @@ python main.py
 - Correlation filter (max 3 same-chain positions)
 - Volatility-based stop loss tightening
 - Liquidity-aware position sizing
-- Paper trading mode by default (no real money at risk)
+- Paper trading mode by default
 
 ## Project Structure
 
 ```
 Quil/
 ├── config/              # Settings, exchange configs, thresholds
-├── core/                # Data pipeline, signal aggregation, execution, risk, position monitor
+├── core/                # Data pipeline, chart analysis, signal aggregator, backtester, execution, risk
 ├── data/                # API clients (DexScreener, Coinglass, explorers, social)
 ├── detection/           # 4 detection layers + lifecycle tracker + orchestrator
 ├── frameworks/          # hl-trap-bot, Freqtrade, Hummingbot, OctoBot adapters
@@ -101,9 +124,11 @@ Quil/
 ├── patterns/            # Historical crime coin pattern database
 ├── telegram_bot/        # Bot interface, handlers, formatters, keyboards
 ├── utils/               # Logging, database
-└── main.py              # Entry point
+├── main.py              # Entry point
+├── Procfile             # Railway deployment
+└── .gitignore
 ```
 
 ## Deployment
 
-Recommended: Railway (~$5/month). Add a `Procfile` with `worker: python main.py` and configure environment variables in the Railway dashboard.
+Deployed on Railway (~$5/month). Auto-redeploys on every `git push origin main`. Configure environment variables in the Railway dashboard.
