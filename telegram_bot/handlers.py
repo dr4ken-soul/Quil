@@ -488,6 +488,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         token_symbol = data.split(":", 1)[1]
         await _handle_refresh(query, token_symbol)
 
+    elif data.startswith("execute_trade:"):
+        token_symbol = data.split(":", 1)[1]
+        await _handle_execute_trade(query, token_symbol)
+
+    elif data.startswith("confirm_trade:"):
+        confirm_id = data.split(":", 1)[1]
+        await _handle_confirm_trade(query, confirm_id)
+
+    elif data.startswith("cancel_trade:"):
+        await query.edit_message_text("❌ Trade cancelled.")
+
     elif data.startswith("watchlist_add:"):
         token_symbol = data.split(":", 1)[1]
         try:
@@ -518,6 +529,211 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
         else:
             await query.edit_message_text("Watchlist is empty.")
+
+
+async def sell_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /sell command. Close a position on the exchange."""
+    if not context.args:
+        await update.message.reply_text(
+            "Please specify the token to sell.\n"
+            "Example: /sell ZAMA"
+        )
+        return
+
+    ticker = context.args[0].upper().replace("$", "")
+
+    if _execution_engine is None:
+        await update.message.reply_text("Execution engine not initialized.")
+        return
+
+    try:
+        await update.message.reply_text(f"Closing ${ticker} position...")
+
+        result = await _execution_engine.close_position(ticker)
+
+        if result.get("closed"):
+            mode = result.get("mode", "unknown")
+            if mode == "paper":
+                await update.message.reply_text(
+                    f"📝 Paper Position Closed\n\n"
+                    f"${ticker} paper position has been closed."
+                )
+            else:
+                entry = result.get("entry_price", 0)
+                close = result.get("close_price", 0)
+                pnl = result.get("pnl_pct_leveraged", 0)
+                emoji = "🟢" if pnl >= 0 else "🔴"
+
+                await update.message.reply_text(
+                    f"✅ Position Closed — ${ticker}\n\n"
+                    f"Exchange: {result.get('exchange', 'unknown')}\n"
+                    f"Entry: ${entry:,.6f}\n"
+                    f"Close: ${close:,.6f}\n"
+                    f"PnL: {emoji} {pnl:+.2f}%\n"
+                    f"Order: {result.get('order_id', 'N/A')}"
+                )
+        else:
+            reason = result.get("reason", "Unknown error")
+            await update.message.reply_text(
+                f"❌ Could not close ${ticker}\n\n"
+                f"Reason: {reason}"
+            )
+
+    except Exception as e:
+        log.error("sell_command_error", ticker=ticker, error=str(e))
+        await update.message.reply_text(f"Error: {str(e)[:200]}")
+
+
+async def _handle_execute_trade(query, token_symbol: str) -> None:
+    """Handle the 'Execute Trade' button. Shows confirmation before executing."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    if _execution_engine is None or _signal_aggregator is None:
+        await query.edit_message_text("Bot is still initializing.")
+        return
+
+    try:
+        # Build fresh signal for execution
+        if _data_pipeline is None:
+            await query.edit_message_text("Data pipeline not available.")
+            return
+
+        await query.edit_message_text(f"Preparing trade for ${token_symbol}...")
+
+        token = await _data_pipeline.build_token_profile(token_symbol)
+        if token is None:
+            await query.edit_message_text(f"Could not find ${token_symbol}")
+            return
+
+        signal = await _signal_aggregator.generate_signal(token)
+        if signal is None:
+            await query.edit_message_text("Could not generate trade signal.")
+            return
+
+        # Store pending trade for confirmation
+        confirm_id = _execution_engine.store_pending_trade(
+            token_symbol, signal, token
+        )
+
+        # Build confirmation message
+        mode = "📝 PAPER" if _execution_engine.paper_trading else "🔴 LIVE"
+        direction_emoji = "📈" if signal.direction.value == "long" else "📉"
+        direction = signal.direction.value.upper()
+
+        entry = signal.risk.entry_price
+        sl = signal.risk.stop_loss
+        tp1 = signal.risk.take_profit_1
+
+        price_fmt = lambda p: f"${p:,.6f}" if p < 1 else f"${p:,.2f}"
+
+        confirm_msg = (
+            f"⚠️ TRADE CONFIRMATION ({mode})\n\n"
+            f"Token: ${token_symbol}\n"
+            f"Direction: {direction_emoji} {direction}\n"
+            f"Entry: {price_fmt(entry)}\n"
+            f"Stop Loss: {price_fmt(sl)}\n"
+            f"Take Profit 1: {price_fmt(tp1)}\n"
+            f"Leverage: {signal.risk.leverage or 3}x\n"
+            f"Confidence: {signal.confidence:.0%}\n\n"
+        )
+
+        if _execution_engine.paper_trading:
+            confirm_msg += "📝 This is a PAPER trade. No real money involved."
+        else:
+            confirm_msg += (
+                "🔴 This will place a REAL order on your exchange!\n"
+                "Real money is at risk. Confirm only if you are sure."
+            )
+
+        buttons = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "✅ Confirm & Execute",
+                    callback_data=f"confirm_trade:{confirm_id}"
+                ),
+                InlineKeyboardButton(
+                    "❌ Cancel",
+                    callback_data=f"cancel_trade:{confirm_id}"
+                ),
+            ],
+        ])
+
+        await query.edit_message_text(confirm_msg, reply_markup=buttons)
+
+    except Exception as e:
+        log.error("execute_trade_error", token=token_symbol, error=str(e))
+        await query.edit_message_text(f"Error preparing trade: {str(e)[:200]}")
+
+
+async def _handle_confirm_trade(query, confirm_id: str) -> None:
+    """Handle trade confirmation. Actually executes the trade."""
+    if _execution_engine is None:
+        await query.edit_message_text("Execution engine not available.")
+        return
+
+    pending = _execution_engine.get_pending_trade(confirm_id)
+    if not pending:
+        await query.edit_message_text(
+            "⏰ Trade confirmation expired (5 minute limit). "
+            "Run /trade again to get a fresh signal."
+        )
+        return
+
+    signal = pending["signal"]
+    token = pending["token"]
+
+    try:
+        await query.edit_message_text(
+            f"⏳ Executing {signal.direction.value.upper()} on ${signal.token_symbol}..."
+        )
+
+        result = await _execution_engine.execute_trade(signal, token)
+
+        if result.get("executed"):
+            mode = result["mode"]
+            if mode == "paper":
+                msg = (
+                    f"📝 Paper Trade Executed\n\n"
+                    f"Token: ${signal.token_symbol}\n"
+                    f"Direction: {signal.direction.value.upper()}\n"
+                    f"Entry: ${signal.risk.entry_price:,.8f}\n"
+                    f"Stop Loss: ${signal.risk.stop_loss:,.8f}\n"
+                    f"TP1: ${signal.risk.take_profit_1:,.8f}\n"
+                    f"Order: {result.get('order_id', 'N/A')}\n\n"
+                    f"Position auto-tracked. Use /positions to monitor."
+                )
+            else:
+                msg = (
+                    f"✅ LIVE Trade Executed\n\n"
+                    f"Exchange: {result.get('exchange', 'unknown')}\n"
+                    f"Token: ${signal.token_symbol}\n"
+                    f"Direction: {signal.direction.value.upper()}\n"
+                    f"Entry: ${result.get('price', 0):,.8f}\n"
+                    f"Amount: {result.get('amount', 0):,.4f}\n"
+                    f"Leverage: {result.get('leverage', 0)}x\n"
+                    f"Order: {result.get('order_id', 'N/A')}\n"
+                    f"SL Order: {result.get('sl_order', 'N/A')}\n"
+                    f"TP Order: {result.get('tp_order', 'N/A')}\n\n"
+                    f"Position auto-tracked. Use /positions to monitor.\n"
+                    f"Use /sell {signal.token_symbol} to close."
+                )
+
+            warnings = result.get("warnings", [])
+            if warnings:
+                msg += "\n⚠️ Warnings:\n" + "\n".join(f"- {w}" for w in warnings)
+
+            await query.edit_message_text(msg)
+        else:
+            reason = result.get("reason", "Unknown error")
+            rejections = result.get("rejections", [])
+            msg = f"❌ Trade NOT Executed\n\nReason: {reason}"
+            if rejections:
+                msg += "\n\nRejections:\n" + "\n".join(f"- {r}" for r in rejections)
+            await query.edit_message_text(msg)
+
+    except Exception as e:
+        log.error("confirm_trade_error", error=str(e))
+        await query.edit_message_text(f"❌ Execution failed: {str(e)[:200]}")
 
 
 async def _handle_refresh(query, token_symbol: str) -> None:

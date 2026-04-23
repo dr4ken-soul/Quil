@@ -10,7 +10,7 @@ import signal
 import sys
 from datetime import datetime, timedelta, timezone
 
-from config.settings import SCAN_INTERVAL_SECONDS, ALERT_COOLDOWN_MINUTES
+from config.settings import SCAN_INTERVAL_SECONDS, ALERT_COOLDOWN_MINUTES, PAPER_TRADING
 from core.data_pipeline import DataPipeline
 from core.signal_aggregator import SignalAggregator
 from core.execution_engine import ExecutionEngine
@@ -40,6 +40,7 @@ class QuilBot:
     - Crime pump detection engine (4 detection layers + lifecycle tracker)
     - Autonomous market scanner
     - Telegram bot interface
+    - Execution engine (paper or live trading)
     """
 
     def __init__(self):
@@ -49,7 +50,7 @@ class QuilBot:
         self.risk_manager = RiskManager(portfolio_value_usd=1000.0)
         self.execution_engine = ExecutionEngine(
             risk_manager=self.risk_manager,
-            paper_trading=True,  # Always start in paper mode
+            paper_trading=PAPER_TRADING,
         )
         self.position_monitor = PositionMonitor(
             data_pipeline=self.data_pipeline,
@@ -81,6 +82,17 @@ class QuilBot:
         await init_db()
         log.info("database_ready")
 
+        # Initialize exchange connections (if live trading mode)
+        if not PAPER_TRADING:
+            exchange_results = await self.execution_engine.initialize_exchanges()
+            connected = [k for k, v in exchange_results.items() if v]
+            if connected:
+                log.info("exchanges_connected", exchanges=connected)
+            else:
+                log.warning("no_exchanges_connected",
+                           note="Live mode active but no exchanges connected. "
+                                "Add API keys to enable trading.")
+
         # Initialize Telegram bot
         await self.telegram.initialize()
 
@@ -98,9 +110,11 @@ class QuilBot:
         log.info("position_monitor_started")
 
         # Send startup message
+        mode = "📝 Paper Trading" if PAPER_TRADING else "🔴 LIVE Trading"
         await self.telegram.send_message(
-            "🟢 Quil Crime Pump Detection Engine is online.\n"
-            "Autonomous scanning active. Send /help for commands."
+            f"🟢 Quil Crime Pump Detection Engine is online.\n"
+            f"Mode: {mode}\n"
+            f"Autonomous scanning active. Send /help for commands."
         )
 
         # Start Telegram polling

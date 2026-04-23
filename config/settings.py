@@ -56,6 +56,11 @@ EXCHANGE_CONFIGS = {
     },
 }
 
+# ── Trading Mode ──────────────────────────────────────────────────────────────
+# Set to "live" to enable real trade execution. Default is "paper".
+TRADING_MODE = os.getenv("TRADING_MODE", "paper").lower()
+PAPER_TRADING = TRADING_MODE != "live"
+
 # ── Social ────────────────────────────────────────────────────────────────────
 TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN", "")
 

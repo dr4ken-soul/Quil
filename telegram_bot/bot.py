@@ -27,6 +27,7 @@ from telegram_bot.handlers import (
     setalert_command,
     calc_command,
     backtest_command,
+    sell_command,
     watch_command,
     watchlist_command,
     alerts_command,
@@ -113,6 +114,7 @@ class QuilTelegramBot:
         self.app.add_handler(CommandHandler("watchlist", watchlist_command))
         self.app.add_handler(CommandHandler("alerts", alerts_command))
         self.app.add_handler(CommandHandler("status", status_command))
+        self.app.add_handler(CommandHandler("sell", sell_command))
 
         # Register callback handler for inline buttons (refresh, etc.)
         self.app.add_handler(CallbackQueryHandler(handle_callback))
