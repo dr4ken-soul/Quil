@@ -161,7 +161,7 @@ class SignalAggregator:
             token_symbol=token.symbol,
             direction=direction,
             confidence=round(confidence, 2),
-            timeframe="15m",
+            timeframe="multi",
             technical_signals=technical_signals,
             onchain_signals=self._gather_onchain_signals(token),
             market_structure_summary=market_structure,
@@ -569,51 +569,78 @@ class SignalAggregator:
         """
         Determine trade direction from TECHNICAL analysis only.
         Crime pump does NOT influence direction — it's a separate warning.
+
+        KEY PRINCIPLE: Don't chase pumps or dumps.
+        If a token has already moved massively, the easy money is gone.
+        Look for REVERSALS and CONTINUATIONS, not momentum chasing.
         """
         bull_score = 0.0
         bear_score = 0.0
 
-        # === PRIMARY: Price momentum ===
         change_5m = token.metrics.price_change_5m
         change_1h = token.metrics.price_change_1h
         change_24h = token.metrics.price_change_24h
 
-        # 5m momentum (most recent)
-        if change_5m > 2:
-            bull_score += 0.15
-        elif change_5m < -2:
-            bear_score += 0.15
-
-        # 1h momentum (short-term trend)
-        if change_1h > 3:
-            bull_score += 0.25
-        elif change_1h > 0:
-            bull_score += 0.10
-        elif change_1h < -3:
+        # === OVEREXTENSION PENALTIES (MOST IMPORTANT) ===
+        # This prevents the bot from going LONG at the top of a pump
+        # or SHORT at the bottom of a dump.
+        if change_24h > 50:
+            # Token pumped >50% in 24h — DO NOT chase long
+            bear_score += 0.40  # Strong bias toward short/reversal
+            bull_score -= 0.20  # Penalize any bullish signals
+            log.info("overextension_penalty_long", token=token.symbol,
+                    change_24h=change_24h, note="Pump too extended, biasing SHORT")
+        elif change_24h > 30:
             bear_score += 0.25
-        elif change_1h < 0:
-            bear_score += 0.10
+            bull_score -= 0.10
+        elif change_24h < -30:
+            # Token dumped >30% in 24h — DO NOT chase short
+            bull_score += 0.30  # Bias toward bounce/reversal
+            bear_score -= 0.15
+            log.info("overextension_penalty_short", token=token.symbol,
+                    change_24h=change_24h, note="Dump too extended, biasing LONG")
+        elif change_24h < -50:
+            bull_score += 0.40
+            bear_score -= 0.20
 
-        # 24h momentum (medium-term trend)
-        if change_24h > 5:
-            bull_score += 0.20
-        elif change_24h < -5:
-            bear_score += 0.20
+        # === MODERATE MOMENTUM (only if NOT overextended) ===
+        if abs(change_24h) <= 30:
+            # 5m momentum (most recent) — reduced weight
+            if change_5m > 2:
+                bull_score += 0.08
+            elif change_5m < -2:
+                bear_score += 0.08
 
-        # === SECONDARY: Trend alignment bonus ===
-        if change_1h > 0 and change_24h > 0 and change_5m > 0:
-            bull_score += 0.15  # All timeframes agree = bullish
-        elif change_1h < 0 and change_24h < 0 and change_5m < 0:
-            bear_score += 0.15  # All timeframes agree = bearish
+            # 1h momentum (short-term trend)
+            if change_1h > 3:
+                bull_score += 0.15
+            elif change_1h > 0:
+                bull_score += 0.05
+            elif change_1h < -3:
+                bear_score += 0.15
+            elif change_1h < 0:
+                bear_score += 0.05
 
-        # === REVERSAL PATTERNS ===
-        # Big 24h drop + 1h bounce = potential long
+            # 24h momentum (medium-term)
+            if change_24h > 5:
+                bull_score += 0.10
+            elif change_24h < -5:
+                bear_score += 0.10
+
+            # Trend alignment bonus (only when moderate)
+            if change_1h > 0 and change_24h > 0 and change_5m > 0:
+                bull_score += 0.10
+            elif change_1h < 0 and change_24h < 0 and change_5m < 0:
+                bear_score += 0.10
+
+        # === REVERSAL PATTERNS (high priority) ===
+        # Big 24h drop + 1h bounce = potential long (mean reversion)
         if change_24h < -15 and change_1h > 3:
-            bull_score += 0.20
+            bull_score += 0.25
 
-        # Big 24h pump + 1h pullback = potential short
+        # Big 24h pump + 1h pullback = potential short (distribution)
         if change_24h > 20 and change_1h < -3:
-            bear_score += 0.20
+            bear_score += 0.25
 
         # === DERIVATIVES CONTEXT ===
         funding = token.derivatives.funding_rate
@@ -622,26 +649,34 @@ class SignalAggregator:
         elif funding > 0.02:
             bear_score += 0.10  # High positive funding = long squeeze potential
 
-        # OI + price direction
         oi_change = token.derivatives.oi_change_1h
         if oi_change > 10 and change_1h > 0:
-            bull_score += 0.10  # Longs opening
+            bull_score += 0.08
         elif oi_change > 10 and change_1h < 0:
-            bear_score += 0.10  # Shorts opening
+            bear_score += 0.08
 
         # === TRAP BOT (secondary confirmation) ===
         if trap and trap.gate_5_passed:
             if trap.trap_fired == TrapType.T2_STOP_SWEEP:
-                bull_score += 0.15  # Stop sweep = reversal up
+                bull_score += 0.15
             elif trap.trap_fired == TrapType.T1_FAILED_BREAKOUT:
                 bull_score += 0.10
             elif trap.trap_fired == TrapType.T3_GIANT_EXHAUSTION:
                 bear_score += 0.15
 
-        # === TECHNICAL SIGNAL WEIGHTS ===
-        # Check name, observation, AND significance for direction cues
+        # === CHART ANALYSIS SIGNALS (high priority — these read real candles) ===
         for sig in tech_signals:
             sig_text = f"{sig.name} {sig.observation} {sig.significance}".lower()
+
+            # RSI extremes get extra weight
+            is_overbought = any(w in sig_text for w in ["overbought", "rsi (8", "rsi (9"])
+            is_oversold = any(w in sig_text for w in ["oversold", "rsi (1", "rsi (2"])
+
+            if is_overbought:
+                bear_score += sig.weight * 0.40  # Strong bearish from RSI extreme
+            elif is_oversold:
+                bull_score += sig.weight * 0.40  # Strong bullish from RSI extreme
+
             is_bullish = any(w in sig_text for w in [
                 "bullish", "bottom", "bounce", "oversold", "support",
                 "hammer", "morning star", "three white", "upward",
@@ -649,6 +684,7 @@ class SignalAggregator:
             is_bearish = any(w in sig_text for w in [
                 "bearish", "top", "overbought", "resistance", "pull back",
                 "shooting star", "evening star", "three black", "downward",
+                "overextended",
             ])
 
             if is_bullish and not is_bearish:
@@ -656,16 +692,18 @@ class SignalAggregator:
             elif is_bearish and not is_bullish:
                 bear_score += sig.weight * 0.25
 
+        # Ensure scores don't go negative
+        bull_score = max(bull_score, 0)
+        bear_score = max(bear_score, 0)
+
         total = bull_score + bear_score
         if total == 0:
-            # No data at all — check if we have ANY price change data
             change_1h = token.metrics.price_change_1h
             if change_1h > 1:
                 return Direction.LONG, 0.30
             elif change_1h < -1:
                 return Direction.SHORT, 0.30
             else:
-                # Truly neutral — still pick based on tiny change but very low confidence
                 if change_1h >= 0:
                     return Direction.LONG, 0.25
                 else:
@@ -679,7 +717,6 @@ class SignalAggregator:
             new_direction = Direction.SHORT
             confidence = bear_score / total
         else:
-            # Exact tie — use momentum
             if token.metrics.price_change_1h >= 0:
                 new_direction = Direction.LONG
             else:
@@ -687,23 +724,17 @@ class SignalAggregator:
             confidence = 0.50
 
         # Direction stickiness — prevent flip-flopping
-        # If we recently called a direction for this token,
-        # require a stronger signal (20% margin) to change it
         symbol = token.symbol
         diff = abs(bull_score - bear_score) / total if total > 0 else 0
 
         if symbol in self._direction_cache:
             cached_dir, cached_time = self._direction_cache[symbol]
-            # Only flip direction if the new signal is meaningfully stronger
             if new_direction != cached_dir and diff < 0.20:
-                # Not strong enough to flip — keep previous direction
                 new_direction = cached_dir
-                confidence = 0.45  # Lower confidence since we're sticking
+                confidence = 0.45
 
-        # Update cache with current direction
         self._direction_cache[symbol] = (new_direction, datetime.now(timezone.utc))
 
-        # Clean old cache entries (keep last 20)
         if len(self._direction_cache) > 20:
             oldest = sorted(self._direction_cache.items(), key=lambda x: x[1][1])
             for key, _ in oldest[:5]:
