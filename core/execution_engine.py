@@ -636,6 +636,105 @@ class ExecutionEngine:
             log.warning("auto_track_failed", error=str(e))
             return None
 
+    async def _monitor_paper_limit_order(self, signal: TradeSignal, token: Token,
+                                          limit_price: float, signal_id,
+                                          timeout_minutes: int = 15) -> None:
+        """
+        Background monitor for paper limit orders.
+        Checks the real market price every 30s. When the price hits the limit,
+        fills the order and starts tracking the position.
+        """
+        from core.data_pipeline import DataPipeline
+
+        check_interval = 30
+        max_checks = (timeout_minutes * 60) // check_interval
+        token_symbol = signal.token_symbol
+        key = f"PAPER-LIMIT-{token_symbol}"
+
+        for i in range(max_checks):
+            await asyncio.sleep(check_interval)
+
+            # Check if order was cancelled
+            order_info = self._active_orders.get(key)
+            if not order_info or order_info.get("status") != "pending":
+                return
+
+            try:
+                # Get fresh price
+                if self.position_monitor and self.position_monitor._data_pipeline:
+                    fresh_token = await self.position_monitor._data_pipeline.build_token_profile(token_symbol)
+                    if fresh_token and fresh_token.metrics.price > 0:
+                        current_price = fresh_token.metrics.price
+                    else:
+                        continue
+                else:
+                    continue
+
+                # Check if limit price has been hit
+                filled = False
+                if signal.direction == Direction.LONG:
+                    # Long limit buy: fills when price drops TO or BELOW limit
+                    if current_price <= limit_price:
+                        filled = True
+                else:
+                    # Short limit sell: fills when price rises TO or ABOVE limit
+                    if current_price >= limit_price:
+                        filled = True
+
+                if filled:
+                    log.info("paper_limit_filled",
+                            token=token_symbol, limit=limit_price,
+                            market=current_price)
+
+                    # Track the position now
+                    self.risk_manager.record_trade_open(signal, token)
+                    position_id = await self._auto_track_position(
+                        signal, "paper", fill_price=limit_price
+                    )
+
+                    # Update status
+                    self._active_orders[key]["status"] = "filled"
+
+                    # Send Telegram notification if available
+                    if self.position_monitor and self.position_monitor._telegram:
+                        price_fmt = lambda p: f"${p:,.6f}" if p < 1 else f"${p:,.2f}"
+                        fill_msg = (
+                            f"✅ Paper LIMIT Order FILLED!\n\n"
+                            f"Token: ${token_symbol}\n"
+                            f"Direction: {signal.direction.value.upper()}\n"
+                            f"Fill Price: {price_fmt(limit_price)}\n"
+                            f"Market Price: {price_fmt(current_price)}\n"
+                            f"SL: {price_fmt(signal.risk.stop_loss)}\n"
+                            f"TP: {price_fmt(signal.risk.take_profit_1)}\n\n"
+                            f"Position is now being tracked. Use /positions to monitor."
+                        )
+                        try:
+                            await self.position_monitor._telegram.send_message(fill_msg)
+                        except Exception:
+                            pass
+
+                    return
+
+            except Exception as e:
+                log.warning("paper_limit_check_error",
+                           token=token_symbol, error=str(e))
+
+        # TIMEOUT — order not filled
+        log.info("paper_limit_timeout", token=token_symbol, minutes=timeout_minutes)
+        if key in self._active_orders:
+            self._active_orders[key]["status"] = "timeout_cancelled"
+
+        # Send timeout notification
+        if self.position_monitor and self.position_monitor._telegram:
+            try:
+                await self.position_monitor._telegram.send_message(
+                    f"⏰ Paper LIMIT order for ${token_symbol} cancelled.\n"
+                    f"Price did not reach limit within {timeout_minutes} minutes.\n"
+                    f"Run /trade {token_symbol} to try again."
+                )
+            except Exception:
+                pass
+
     def _select_exchange(self, token: Token) -> str:
         """Select the best exchange for execution."""
         # Prefer Bybit since the user trades there
@@ -820,17 +919,34 @@ class ExecutionEngine:
             log.error("signal_save_error", error=str(e))
             signal_id = None
 
-        # Paper trading mode
+        # Paper trading mode — simulate limit order waiting for fill
         if self.paper_trading:
-            log.info("paper_limit_trade",
+            log.info("paper_limit_trade_pending",
                     token=adjusted_signal.token_symbol,
                     direction=adjusted_signal.direction.value,
                     limit_price=limit_price,
                     market_price=token.metrics.price)
 
-            self.risk_manager.record_trade_open(adjusted_signal, token)
-            position_id = await self._auto_track_position(adjusted_signal, "paper",
-                                                          fill_price=limit_price)
+            # Store as pending paper limit order — NOT immediately filled
+            self._active_orders[f"PAPER-LIMIT-{adjusted_signal.token_symbol}"] = {
+                "order_id": f"PAPER-LIMIT-{signal_id or 'unknown'}",
+                "signal": adjusted_signal,
+                "token_symbol": adjusted_signal.token_symbol,
+                "limit_price": limit_price,
+                "market_price": token.metrics.price,
+                "direction": adjusted_signal.direction.value,
+                "status": "pending",
+                "timeout_minutes": timeout_minutes,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+
+            # Start background monitoring for paper limit fill
+            asyncio.create_task(
+                self._monitor_paper_limit_order(
+                    adjusted_signal, token, limit_price,
+                    signal_id, timeout_minutes
+                )
+            )
 
             return {
                 "executed": True,
@@ -843,10 +959,10 @@ class ExecutionEngine:
                 "sl": adjusted_signal.risk.stop_loss,
                 "tp1": adjusted_signal.risk.take_profit_1,
                 "signal": adjusted_signal,
-                "position_id": position_id,
+                "position_id": None,  # Not tracked until filled
                 "warnings": risk_check.get("warnings", []),
-                "message": f"📝 Paper LIMIT order placed at ${limit_price}. "
-                           f"({entry_calc.get('reasoning', '')})",
+                "message": f"📋 Paper LIMIT order PENDING at ${limit_price}. "
+                           f"Monitoring price... auto-cancels in {timeout_minutes}min.",
             }
 
         # === LIVE LIMIT ORDER ===

@@ -822,8 +822,9 @@ async def _handle_confirm_limit_trade(query, confirm_id: str) -> None:
             price_fmt = lambda p: f"${p:,.6f}" if p < 1 else f"${p:,.2f}"
 
             if mode == "paper":
+                timeout = result.get("signal", signal)
                 msg = (
-                    f"📝 Paper LIMIT Order Placed\n\n"
+                    f"📋 Paper LIMIT Order PENDING\n\n"
                     f"Token: ${signal.token_symbol}\n"
                     f"Direction: {signal.direction.value.upper()}\n"
                     f"Limit Price: {price_fmt(limit_price)}\n"
@@ -831,7 +832,9 @@ async def _handle_confirm_limit_trade(query, confirm_id: str) -> None:
                     f"Offset: {offset:.1f}% better entry\n"
                     f"SL: {price_fmt(result.get('sl', 0))}\n"
                     f"TP: {price_fmt(result.get('tp1', 0))}\n\n"
-                    f"Position auto-tracked. Use /positions to monitor."
+                    f"⏳ Waiting for price to hit limit...\n"
+                    f"Auto-cancels in 15 min if not filled.\n"
+                    f"You'll get a notification when filled."
                 )
             else:
                 timeout = result.get("timeout_minutes", 15)
