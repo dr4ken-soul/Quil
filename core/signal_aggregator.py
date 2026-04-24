@@ -84,6 +84,7 @@ class SignalAggregator:
         crime_pump_alert: Optional[CrimePumpAlert] = None,
         trap_result: Optional[TrapDetectionResult] = None,
         ohlcv_data=None,
+        multi_tf_data: dict = None,
     ) -> TradeSignal:
         """
         Generate a complete trade signal from all available data.
@@ -94,6 +95,8 @@ class SignalAggregator:
         3. Trap bot — secondary confirmation
         4. Market structure — context
         5. Crime pump — WARNING overlay only
+
+        multi_tf_data: {"15m": [candles], "1h": [candles], "4h": [candles]}
         """
         log.info("generating_signal", token=token.symbol)
 
@@ -104,9 +107,27 @@ class SignalAggregator:
         framework_signals = await self._run_frameworks(token)
         technical_signals.extend(framework_signals)
 
-        # Step 2b: Run chart analysis if OHLCV data available
-        chart_signals = self._run_chart_analysis(ohlcv_data)
-        technical_signals.extend(chart_signals)
+        # Step 2b: Run MULTI-TIMEFRAME chart analysis
+        # Each timeframe gets analyzed separately with different weights
+        if multi_tf_data:
+            tf_weights = {"15m": 0.8, "1h": 1.0, "4h": 1.2}  # Higher TF = more weight
+            for tf_name, candles in multi_tf_data.items():
+                if candles and len(candles) >= 5:
+                    tf_signals = self._run_chart_analysis(candles, tf_name)
+                    # Scale weights by timeframe importance
+                    weight_mult = tf_weights.get(tf_name, 1.0)
+                    for sig in tf_signals:
+                        sig.weight *= weight_mult
+                    technical_signals.extend(tf_signals)
+
+            log.info("multi_tf_analysis_complete",
+                    token=token.symbol,
+                    timeframes=list(multi_tf_data.keys()),
+                    total_signals=len(technical_signals))
+        elif ohlcv_data:
+            # Fallback: single timeframe
+            chart_signals = self._run_chart_analysis(ohlcv_data)
+            technical_signals.extend(chart_signals)
 
         # Step 3: Volume analysis
         volume_signals = self._analyze_volume(token)
@@ -405,13 +426,16 @@ class SignalAggregator:
 
         return signals
 
-    def _run_chart_analysis(self, ohlcv_data) -> list[TechnicalSignal]:
+    def _run_chart_analysis(self, ohlcv_data, timeframe_label: str = "") -> list[TechnicalSignal]:
         """
         Run full chart analysis using the ChartAnalyzer.
         Adds candlestick patterns, RSI, EMA, MACD, Bollinger Bands,
         support/resistance levels, and trend analysis.
+
+        timeframe_label: e.g. "15m", "1h", "4h" — prefixed to signal names
         """
         signals = []
+        prefix = f"[{timeframe_label}] " if timeframe_label else ""
 
         if not self._chart_analyzer or not ohlcv_data:
             return signals
@@ -422,7 +446,7 @@ class SignalAggregator:
             # Add candlestick patterns
             for pattern in result.patterns:
                 signals.append(TechnicalSignal(
-                    name=f"Pattern: {pattern.name}",
+                    name=f"{prefix}Pattern: {pattern.name}",
                     observation=f"{pattern.pattern_type.title()} candlestick pattern detected",
                     significance=pattern.significance,
                     weight=pattern.weight,
@@ -431,7 +455,7 @@ class SignalAggregator:
             # Add RSI
             if result.rsi_signal:
                 signals.append(TechnicalSignal(
-                    name=f"RSI ({result.rsi:.0f})",
+                    name=f"{prefix}RSI ({result.rsi:.0f})",
                     observation=f"RSI is at {result.rsi:.1f}",
                     significance=result.rsi_signal,
                     weight=0.6 if result.rsi > 70 or result.rsi < 30 else 0.4,
@@ -440,7 +464,7 @@ class SignalAggregator:
             # Add EMA
             if result.ema_signal and "Insufficient" not in result.ema_signal:
                 signals.append(TechnicalSignal(
-                    name="EMA Crossover",
+                    name=f"{prefix}EMA Crossover",
                     observation=result.ema_signal,
                     significance="EMA 9/21 crossover is one of the most reliable "
                                "short-term trend indicators used by professional traders.",
@@ -450,7 +474,7 @@ class SignalAggregator:
             # Add MACD
             if result.macd_signal and "Insufficient" not in result.macd_signal:
                 signals.append(TechnicalSignal(
-                    name="MACD",
+                    name=f"{prefix}MACD",
                     observation=result.macd_signal,
                     significance="MACD confirms the direction of momentum. "
                                "Alignment with other indicators increases confidence.",
@@ -460,7 +484,7 @@ class SignalAggregator:
             # Add Bollinger Bands
             if result.bb_signal and "Insufficient" not in result.bb_signal:
                 signals.append(TechnicalSignal(
-                    name="Bollinger Bands",
+                    name=f"{prefix}Bollinger Bands",
                     observation=result.bb_signal,
                     significance="Bollinger Bands measure volatility. Price at the bands "
                                "often reverses, especially when combined with other signals.",
@@ -471,7 +495,7 @@ class SignalAggregator:
             for s in result.support_levels[:2]:
                 p_str = f"${s.price:.6f}" if s.price < 1 else f"${s.price:,.2f}"
                 signals.append(TechnicalSignal(
-                    name=f"Support at {p_str}",
+                    name=f"{prefix}Support at {p_str}",
                     observation=f"Support level at {p_str} (strength: {s.strength})",
                     significance=s.description + ". Price may bounce here.",
                     weight=0.4 + min(s.strength * 0.1, 0.3),
@@ -480,7 +504,7 @@ class SignalAggregator:
             for r in result.resistance_levels[:2]:
                 p_str = f"${r.price:.6f}" if r.price < 1 else f"${r.price:,.2f}"
                 signals.append(TechnicalSignal(
-                    name=f"Resistance at {p_str}",
+                    name=f"{prefix}Resistance at {p_str}",
                     observation=f"Resistance level at {p_str} (strength: {r.strength})",
                     significance=r.description + ". Price may reject here.",
                     weight=0.4 + min(r.strength * 0.1, 0.3),
@@ -489,7 +513,7 @@ class SignalAggregator:
             # Overall chart trend
             if result.trend != "neutral":
                 signals.append(TechnicalSignal(
-                    name=f"Chart Trend: {result.trend.title()}",
+                    name=f"{prefix}Chart Trend: {result.trend.title()}",
                     observation=f"Overall chart shows {result.trend} trend "
                               f"with {result.trend_strength:.0%} strength",
                     significance=f"The chart's overall structure is {result.trend}. "

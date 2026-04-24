@@ -261,6 +261,187 @@ class DataPipeline:
 
         return None
 
+    async def fetch_multi_timeframe_candles(self, symbol: str) -> dict:
+        """
+        Fetch OHLCV candle data from multiple timeframes.
+
+        Priority: Bybit API (accurate, no key needed) → CoinGecko (DEX fallback)
+        Returns: {"15m": [candles], "1h": [candles], "4h": [candles]}
+        Each candle: {"open": float, "high": float, "low": float,
+                      "close": float, "volume": float, "timestamp": int}
+        """
+        result = {}
+        ticker = symbol.upper().replace("$", "")
+
+        # Skip contract addresses
+        if len(ticker) > 10 or ticker.startswith("0X"):
+            return result
+
+        # Try Bybit first (most accurate, no API key needed)
+        bybit_data = await self._fetch_bybit_candles(ticker)
+        if bybit_data:
+            return bybit_data
+
+        # Fallback: CoinGecko (for DEX tokens not on Bybit)
+        cg_data = await self._fetch_coingecko_candles(ticker)
+        if cg_data:
+            return cg_data
+
+        return result
+
+    async def _fetch_bybit_candles(self, ticker: str) -> dict:
+        """Fetch candle data from Bybit public API (no API key needed)."""
+        import aiohttp
+
+        result = {}
+        symbol = f"{ticker}USDT"
+
+        timeframe_map = {
+            "15m": {"interval": "15", "limit": 100},   # 100 x 15min = ~25h
+            "1h":  {"interval": "60", "limit": 100},   # 100 x 1h = ~4 days
+            "4h":  {"interval": "240", "limit": 100},   # 100 x 4h = ~16 days
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                for tf_name, params in timeframe_map.items():
+                    url = "https://api.bybit.com/v5/market/kline"
+                    async with session.get(
+                        url,
+                        params={
+                            "category": "linear",
+                            "symbol": symbol,
+                            "interval": params["interval"],
+                            "limit": params["limit"],
+                        },
+                        timeout=aiohttp.ClientTimeout(total=8),
+                    ) as resp:
+                        if resp.status != 200:
+                            continue
+
+                        data = await resp.json()
+                        klines = data.get("result", {}).get("list", [])
+
+                        if not klines:
+                            # Try spot market
+                            async with session.get(
+                                url,
+                                params={
+                                    "category": "spot",
+                                    "symbol": symbol,
+                                    "interval": params["interval"],
+                                    "limit": params["limit"],
+                                },
+                                timeout=aiohttp.ClientTimeout(total=8),
+                            ) as resp2:
+                                if resp2.status == 200:
+                                    data2 = await resp2.json()
+                                    klines = data2.get("result", {}).get("list", [])
+
+                        if klines:
+                            # Bybit returns [timestamp, open, high, low, close, volume, turnover]
+                            # Most recent first — reverse for chronological order
+                            candles = []
+                            for k in reversed(klines):
+                                candles.append({
+                                    "timestamp": int(k[0]),
+                                    "open": float(k[1]),
+                                    "high": float(k[2]),
+                                    "low": float(k[3]),
+                                    "close": float(k[4]),
+                                    "volume": float(k[5]),
+                                })
+                            result[tf_name] = candles
+
+                if result:
+                    log.info("bybit_candles_fetched", symbol=ticker,
+                            timeframes=list(result.keys()),
+                            counts={k: len(v) for k, v in result.items()})
+
+        except Exception as e:
+            log.warning("bybit_candles_failed", symbol=ticker, error=str(e))
+
+        return result
+
+    async def _fetch_coingecko_candles(self, ticker: str) -> dict:
+        """Fetch candle data from CoinGecko (for DEX tokens not on Bybit)."""
+        import aiohttp
+
+        result = {}
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Step 1: Resolve CoinGecko coin ID
+                search_url = "https://api.coingecko.com/api/v3/search"
+                async with session.get(
+                    search_url,
+                    params={"query": ticker},
+                    timeout=aiohttp.ClientTimeout(total=8),
+                ) as resp:
+                    if resp.status != 200:
+                        return result
+                    search_data = await resp.json()
+
+                coins = search_data.get("coins", [])
+                coin_id = None
+                for coin in coins:
+                    if coin.get("symbol", "").upper() == ticker:
+                        coin_id = coin.get("id")
+                        break
+                if not coin_id and coins:
+                    coin_id = coins[0].get("id")
+                if not coin_id:
+                    return result
+
+                # Step 2: Fetch OHLC data (CoinGecko free = 1d/7d/14d/30d)
+                # 1 day = gives ~6min candles → use as "15m" equivalent
+                # 7 days = gives ~hourly candles → use as "1h"
+                # 30 days = gives ~4h candles → use as "4h"
+                ohlc_map = {
+                    "15m": {"days": "1"},
+                    "1h": {"days": "7"},
+                    "4h": {"days": "30"},
+                }
+
+                for tf_name, params in ohlc_map.items():
+                    ohlc_url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
+                    async with session.get(
+                        ohlc_url,
+                        params={"vs_currency": "usd", "days": params["days"]},
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        if resp.status != 200:
+                            continue
+                        ohlc_data = await resp.json()
+
+                        if ohlc_data and isinstance(ohlc_data, list):
+                            candles = []
+                            for entry in ohlc_data:
+                                if len(entry) >= 5:
+                                    candles.append({
+                                        "timestamp": int(entry[0]),
+                                        "open": float(entry[1]),
+                                        "high": float(entry[2]),
+                                        "low": float(entry[3]),
+                                        "close": float(entry[4]),
+                                        "volume": 0,  # CoinGecko OHLC doesn't include volume
+                                    })
+                            if candles:
+                                result[tf_name] = candles
+
+                    # Rate limit: CoinGecko free = 10-30 req/min
+                    await asyncio.sleep(1.5)
+
+                if result:
+                    log.info("coingecko_candles_fetched", symbol=ticker,
+                            timeframes=list(result.keys()),
+                            counts={k: len(v) for k, v in result.items()})
+
+        except Exception as e:
+            log.warning("coingecko_candles_failed", symbol=ticker, error=str(e))
+
+        return result
+
     async def _enrich_derivatives(self, token: Token) -> None:
         """Enrich token with derivatives data from Coinglass."""
         try:

@@ -262,9 +262,17 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
 
         # Generate trade signal with all sources combined
+        # Fetch multi-timeframe candle data for REAL chart analysis
+        multi_tf_data = {}
+        try:
+            multi_tf_data = await _data_pipeline.fetch_multi_timeframe_candles(token.symbol)
+        except Exception as e:
+            log.warning("candle_fetch_failed", symbol=token.symbol, error=str(e))
+
         trade_signal = await _signal_aggregator.generate_trade_signal(
             token=token,
             crime_pump_alert=crime_alert if crime_alert.total_layers_triggered > 0 else None,
+            multi_tf_data=multi_tf_data if multi_tf_data else None,
         )
 
         # Run risk validation if execution engine is available
@@ -617,7 +625,17 @@ async def _handle_execute_trade(query, token_symbol: str) -> None:
             await query.edit_message_text(f"Could not find ${token_symbol}")
             return
 
-        signal = await _signal_aggregator.generate_signal(token)
+        # Fetch multi-timeframe candle data for chart analysis
+        multi_tf_data = {}
+        try:
+            multi_tf_data = await _data_pipeline.fetch_multi_timeframe_candles(token_symbol)
+        except Exception:
+            pass
+
+        signal = await _signal_aggregator.generate_trade_signal(
+            token=token,
+            multi_tf_data=multi_tf_data if multi_tf_data else None,
+        )
         if signal is None:
             await query.edit_message_text("Could not generate trade signal.")
             return
@@ -1050,10 +1068,18 @@ async def _handle_trade_analysis(query, token_symbol: str) -> None:
             if crime_alert.total_layers_triggered == 0:
                 crime_alert = None
 
+        # Fetch multi-timeframe candle data
+        multi_tf_data = {}
+        try:
+            multi_tf_data = await _data_pipeline.fetch_multi_timeframe_candles(token.symbol)
+        except Exception:
+            pass
+
         # Generate trade signal
         trade_signal = await _signal_aggregator.generate_trade_signal(
             token=token,
             crime_pump_alert=crime_alert,
+            multi_tf_data=multi_tf_data if multi_tf_data else None,
         )
 
         message = format_trade_analysis(trade_signal)
@@ -1469,7 +1495,15 @@ async def calc_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 await update.message.reply_text(f"Calculating trade for ${symbol}...")
                 token = await _data_pipeline.build_token_profile(symbol)
                 if token:
-                    signal = await _signal_aggregator.generate_signal(token)
+                    multi_tf = {}
+                    try:
+                        multi_tf = await _data_pipeline.fetch_multi_timeframe_candles(symbol)
+                    except Exception:
+                        pass
+                    signal = await _signal_aggregator.generate_trade_signal(
+                        token=token,
+                        multi_tf_data=multi_tf if multi_tf else None,
+                    )
                     if signal:
                         if entry_price is None:
                             entry_price = signal.risk.entry_price
