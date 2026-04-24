@@ -19,8 +19,9 @@ Autonomous crypto trading bot with a four-layer crime pump detection system, exp
 | 10.5 | Expert chart analysis + Bybit price pipeline + bug fixes | ✅ Complete |
 | 11 | Live execution (Execute Trade button + /sell + paper/live mode) | ✅ Complete |
 | 11.5 | Supabase PostgreSQL + position tracking fix | ✅ Complete |
+| 12 | Performance dashboard (/stats) | ✅ Complete |
 | — | **Deployed on Railway (24/7)** | ✅ Live |
-| 12 | Performance dashboard (/stats) | ❌ Next |
+| 13 | Smart limit orders (optimal entry) | ❌ Next |
 
 ## Three Main Features
 
@@ -64,6 +65,7 @@ Token Price Resolution (priority order):
 | `/alerts` | View recent detections |
 | `/risk` | Portfolio risk status and circuit breaker |
 | `/status` | Data source health check |
+| `/stats` | Performance dashboard (win rate, PnL, trade history) |
 
 ### Trade Execution Flow
 1. `/trade ZAMA` → Get analysis with entry, SL, TP, leverage

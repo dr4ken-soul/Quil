@@ -730,3 +730,120 @@ async def close_position(position_id: int, reason: str = "Manual") -> None:
             """, (reason, position_id))
             await db.commit()
             log.info("position_closed", id=position_id, reason=reason)
+
+
+async def get_closed_positions(limit: int = 50) -> list[dict]:
+    """Get closed positions for performance analysis."""
+    if USE_POSTGRES:
+        pool = await _get_pg_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM tracked_positions WHERE is_open = 0 "
+                "ORDER BY closed_at DESC LIMIT $1", limit
+            )
+            return [dict(row) for row in rows]
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM tracked_positions WHERE is_open = 0 "
+                "ORDER BY closed_at DESC LIMIT ?", (limit,)
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+
+async def get_all_positions() -> list[dict]:
+    """Get ALL positions (open and closed) for performance stats."""
+    if USE_POSTGRES:
+        pool = await _get_pg_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM tracked_positions ORDER BY opened_at DESC"
+            )
+            return [dict(row) for row in rows]
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM tracked_positions ORDER BY opened_at DESC"
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+
+async def get_performance_stats() -> dict:
+    """Calculate performance statistics from closed positions."""
+    closed = await get_closed_positions(limit=500)
+    active = await get_active_positions()
+
+    if not closed:
+        return {
+            "total_trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": 0.0,
+            "total_pnl_pct": 0.0,
+            "avg_win_pct": 0.0,
+            "avg_loss_pct": 0.0,
+            "best_trade": None,
+            "worst_trade": None,
+            "profit_factor": 0.0,
+            "avg_leverage": 0,
+            "active_count": len(active),
+            "closed_trades": [],
+            "by_direction": {"LONG": {"wins": 0, "losses": 0}, "SHORT": {"wins": 0, "losses": 0}},
+        }
+
+    total = len(closed)
+    wins = [t for t in closed if (t.get("pnl_pct") or 0) > 0]
+    losses = [t for t in closed if (t.get("pnl_pct") or 0) <= 0]
+
+    win_pnls = [t.get("pnl_pct", 0) for t in wins]
+    loss_pnls = [t.get("pnl_pct", 0) for t in losses]
+
+    total_pnl = sum(t.get("pnl_pct", 0) for t in closed)
+    avg_win = sum(win_pnls) / len(win_pnls) if win_pnls else 0
+    avg_loss = sum(loss_pnls) / len(loss_pnls) if loss_pnls else 0
+
+    total_wins_pnl = sum(win_pnls) if win_pnls else 0
+    total_losses_pnl = abs(sum(loss_pnls)) if loss_pnls else 0
+    profit_factor = total_wins_pnl / total_losses_pnl if total_losses_pnl > 0 else float('inf') if total_wins_pnl > 0 else 0
+
+    best = max(closed, key=lambda t: t.get("pnl_pct", 0))
+    worst = min(closed, key=lambda t: t.get("pnl_pct", 0))
+
+    leverages = [t.get("leverage", 1) for t in closed if t.get("leverage", 1) > 0]
+    avg_leverage = sum(leverages) / len(leverages) if leverages else 1
+
+    # Direction breakdown
+    by_dir = {"LONG": {"wins": 0, "losses": 0}, "SHORT": {"wins": 0, "losses": 0}}
+    for t in closed:
+        d = t.get("direction", "LONG").upper()
+        if d not in by_dir:
+            d = "LONG"
+        if (t.get("pnl_pct") or 0) > 0:
+            by_dir[d]["wins"] += 1
+        else:
+            by_dir[d]["losses"] += 1
+
+    # Recent trades (last 10)
+    recent = closed[:10]
+
+    return {
+        "total_trades": total,
+        "wins": len(wins),
+        "losses": len(losses),
+        "win_rate": len(wins) / total * 100 if total > 0 else 0,
+        "total_pnl_pct": total_pnl,
+        "avg_win_pct": avg_win,
+        "avg_loss_pct": avg_loss,
+        "best_trade": best,
+        "worst_trade": worst,
+        "profit_factor": profit_factor,
+        "avg_leverage": avg_leverage,
+        "active_count": len(active),
+        "closed_trades": recent,
+        "by_direction": by_dir,
+    }
+

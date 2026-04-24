@@ -26,7 +26,7 @@ from telegram_bot.keyboards import (
     get_positions_keyboard,
 )
 from utils.logger import get_logger
-from utils.database import get_active_watchlist, add_to_watchlist, get_recent_alerts
+from utils.database import get_active_watchlist, add_to_watchlist, get_recent_alerts, get_performance_stats
 
 log = get_logger("telegram_handlers")
 
@@ -91,6 +91,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "/alerts - View recent alerts\n"
         "/risk - View current risk status\n"
         "/status - Bot status and data source health\n"
+        "/sell [ticker] - Close a live exchange position\n"
+        "/stats - Performance dashboard (win rate, PnL)\n"
         "/backtest [ticker] [days] - Test signals against history\n"
         "/help - Show all commands\n"
         "\n"
@@ -131,6 +133,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/alerts [hours] - View recent crime pump alerts. Default 24 hours.\n"
         "/risk - View risk management status, open positions, circuit breaker.\n"
         "/status - Check bot health and data source availability.\n"
+        "/sell [ticker] - Close a live exchange position.\n"
+        "/stats - Performance dashboard with win rate, PnL, and trade history.\n"
         "/backtest [ticker] [period] - Test signals against historical data. "
         "Example: /backtest BTC 30d\n"
         "\n"
@@ -1437,3 +1441,110 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         except Exception as e:
             log.error("backtest_error", error=str(e))
             await update.message.reply_text(f"Trade backtest failed: {str(e)}")
+
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /stats command. Show performance dashboard."""
+    await update.message.reply_text("📊 Calculating performance stats...")
+
+    try:
+        stats = await get_performance_stats()
+
+        if stats["total_trades"] == 0:
+            # No closed trades yet — show what we have
+            active = stats["active_count"]
+            await update.message.reply_text(
+                "📊 Performance Dashboard\n"
+                f"{'=' * 28}\n\n"
+                "No closed trades yet.\n\n"
+                f"📋 Active Positions: {active}\n\n"
+                "Close positions with /close to start\n"
+                "building your performance history."
+            )
+            return
+
+        # Build the dashboard
+        total = stats["total_trades"]
+        wins = stats["wins"]
+        losses = stats["losses"]
+        win_rate = stats["win_rate"]
+        total_pnl = stats["total_pnl_pct"]
+        avg_win = stats["avg_win_pct"]
+        avg_loss = stats["avg_loss_pct"]
+        pf = stats["profit_factor"]
+        avg_lev = stats["avg_leverage"]
+        active = stats["active_count"]
+        by_dir = stats["by_direction"]
+
+        # Win rate emoji
+        if win_rate >= 60:
+            wr_emoji = "🟢"
+        elif win_rate >= 40:
+            wr_emoji = "🟡"
+        else:
+            wr_emoji = "🔴"
+
+        # PnL emoji
+        pnl_emoji = "📈" if total_pnl >= 0 else "📉"
+
+        # Profit factor rating
+        if pf >= 2.0:
+            pf_rating = "Excellent"
+        elif pf >= 1.5:
+            pf_rating = "Good"
+        elif pf >= 1.0:
+            pf_rating = "Break-even"
+        else:
+            pf_rating = "Losing"
+
+        lines = [
+            "📊 Performance Dashboard",
+            f"{'=' * 28}\n",
+            f"{wr_emoji} Win Rate: {win_rate:.1f}% ({wins}W / {losses}L)",
+            f"{pnl_emoji} Total PnL: {total_pnl:+.1f}%",
+            f"📋 Total Trades: {total}",
+            f"📋 Active Positions: {active}\n",
+            "💰 Trade Averages:",
+            f"  Avg Win:  {avg_win:+.1f}%",
+            f"  Avg Loss: {avg_loss:+.1f}%",
+            f"  Avg Leverage: {avg_lev:.0f}x\n",
+            f"⚖️ Profit Factor: {pf:.2f} ({pf_rating})",
+        ]
+
+        # Best & worst trade
+        best = stats["best_trade"]
+        worst = stats["worst_trade"]
+        if best:
+            lines.append(f"\n🏆 Best Trade: ${best.get('symbol', '?')} "
+                        f"({best.get('direction', '?')}) "
+                        f"{best.get('pnl_pct', 0):+.1f}%")
+        if worst:
+            lines.append(f"💀 Worst Trade: ${worst.get('symbol', '?')} "
+                        f"({worst.get('direction', '?')}) "
+                        f"{worst.get('pnl_pct', 0):+.1f}%")
+
+        # Direction breakdown
+        long_total = by_dir["LONG"]["wins"] + by_dir["LONG"]["losses"]
+        short_total = by_dir["SHORT"]["wins"] + by_dir["SHORT"]["losses"]
+        lines.append(f"\n📈 LONG: {by_dir['LONG']['wins']}W/{by_dir['LONG']['losses']}L"
+                    f" ({by_dir['LONG']['wins']/long_total*100:.0f}% WR)" if long_total > 0 else "\n📈 LONG: No trades")
+        lines.append(f"📉 SHORT: {by_dir['SHORT']['wins']}W/{by_dir['SHORT']['losses']}L"
+                    f" ({by_dir['SHORT']['wins']/short_total*100:.0f}% WR)" if short_total > 0 else "📉 SHORT: No trades")
+
+        # Recent trade history
+        recent = stats["closed_trades"]
+        if recent:
+            lines.append(f"\n📜 Recent Trades (last {len(recent)}):")
+            for t in recent[:5]:
+                symbol = t.get("symbol", "?")
+                direction = t.get("direction", "?").upper()
+                pnl = t.get("pnl_pct", 0) or 0
+                reason = t.get("close_reason", "Manual")
+                emoji = "✅" if pnl > 0 else "❌"
+                lines.append(f"  {emoji} ${symbol} ({direction}) {pnl:+.1f}% — {reason}")
+
+        await update.message.reply_text("\n".join(lines))
+
+    except Exception as e:
+        log.error("stats_error", error=str(e))
+        await update.message.reply_text(f"Error loading stats: {str(e)[:200]}")
