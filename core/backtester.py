@@ -284,11 +284,15 @@ class BacktestEngine:
         result.detection_timeline = detection_timeline
 
         if trades:
-            winners = [t for t in trades if t.pnl_pct > 0]
-            losers = [t for t in trades if t.pnl_pct <= 0]
+            # A trade needs >0.5% profit to count as a win (not just barely positive)
+            winners = [t for t in trades if t.pnl_pct > 0.5]
+            losers = [t for t in trades if t.pnl_pct < -0.5]
+            breakeven = [t for t in trades if -0.5 <= t.pnl_pct <= 0.5]
             result.winning_trades = len(winners)
             result.losing_trades = len(losers)
-            result.win_rate = len(winners) / len(trades) * 100
+            # Win rate based on decisive trades only (exclude breakeven)
+            decisive = len(winners) + len(losers)
+            result.win_rate = len(winners) / decisive * 100 if decisive > 0 else 0
 
             result.total_pnl_usd = balance - initial_balance
             result.total_pnl_pct = (balance - initial_balance) / initial_balance * 100
@@ -587,10 +591,11 @@ def format_backtest_result(result: BacktestResult) -> str:
     ])
 
     # Trade statistics
+    breakeven = result.total_trades - result.winning_trades - result.losing_trades
     lines.extend([
         "Trade Stats:",
         f"  Total Trades: {result.total_trades}",
-        f"  Wins: {result.winning_trades} | Losses: {result.losing_trades}",
+        f"  Wins: {result.winning_trades} | Losses: {result.losing_trades} | Breakeven: {breakeven}",
         f"  Win Rate: {result.win_rate:.1f}%",
         f"  Avg Win: {result.avg_win_pct:+.1f}%",
         f"  Avg Loss: {result.avg_loss_pct:.1f}%",
@@ -613,7 +618,12 @@ def format_backtest_result(result: BacktestResult) -> str:
     if result.trades:
         lines.append("Recent Trades:")
         for trade in result.trades[-5:]:
-            emoji = "🟢" if trade.pnl_pct > 0 else "🔴"
+            if trade.pnl_pct > 0.5:
+                emoji = "🟢"
+            elif trade.pnl_pct < -0.5:
+                emoji = "🔴"
+            else:
+                emoji = "⚪"  # Breakeven
             lines.append(
                 f"  {emoji} {trade.direction} {trade.exit_reason} "
                 f"{trade.pnl_pct:+.1f}% (${trade.pnl_usd:+,.2f})"
