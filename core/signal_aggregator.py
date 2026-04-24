@@ -570,9 +570,10 @@ class SignalAggregator:
         Determine trade direction from TECHNICAL analysis only.
         Crime pump does NOT influence direction — it's a separate warning.
 
-        KEY PRINCIPLE: Don't chase pumps or dumps.
-        If a token has already moved massively, the easy money is gone.
-        Look for REVERSALS and CONTINUATIONS, not momentum chasing.
+        KEY PRINCIPLE: Let the chart decide direction.
+        When a token has moved a lot, reduce the WEIGHT of raw momentum
+        so the real indicators (RSI, EMA, patterns) have more say.
+        Don't force a direction — a 200% pump can keep going.
         """
         bull_score = 0.0
         bear_score = 0.0
@@ -581,57 +582,47 @@ class SignalAggregator:
         change_1h = token.metrics.price_change_1h
         change_24h = token.metrics.price_change_24h
 
-        # === OVEREXTENSION PENALTIES (MOST IMPORTANT) ===
-        # This prevents the bot from going LONG at the top of a pump
-        # or SHORT at the bottom of a dump.
-        if change_24h > 50:
-            # Token pumped >50% in 24h — DO NOT chase long
-            bear_score += 0.40  # Strong bias toward short/reversal
-            bull_score -= 0.20  # Penalize any bullish signals
-            log.info("overextension_penalty_long", token=token.symbol,
-                    change_24h=change_24h, note="Pump too extended, biasing SHORT")
-        elif change_24h > 30:
-            bear_score += 0.25
-            bull_score -= 0.10
-        elif change_24h < -30:
-            # Token dumped >30% in 24h — DO NOT chase short
-            bull_score += 0.30  # Bias toward bounce/reversal
-            bear_score -= 0.15
-            log.info("overextension_penalty_short", token=token.symbol,
-                    change_24h=change_24h, note="Dump too extended, biasing LONG")
-        elif change_24h < -50:
-            bull_score += 0.40
-            bear_score -= 0.20
+        # === MOMENTUM WEIGHT SCALING ===
+        # When price has moved massively, raw momentum is LESS reliable.
+        # Reduce its influence so chart indicators (RSI, patterns) dominate.
+        # But DON'T force a direction — the chart decides.
+        if abs(change_24h) > 50:
+            momentum_scale = 0.3  # Very overextended: momentum barely counts
+            log.info("overextension_detected", token=token.symbol,
+                    change_24h=change_24h, note="Reducing momentum weight, chart signals dominate")
+        elif abs(change_24h) > 30:
+            momentum_scale = 0.5  # Somewhat overextended: momentum reduced
+        else:
+            momentum_scale = 1.0  # Normal: full momentum weight
 
-        # === MODERATE MOMENTUM (only if NOT overextended) ===
-        if abs(change_24h) <= 30:
-            # 5m momentum (most recent) — reduced weight
-            if change_5m > 2:
-                bull_score += 0.08
-            elif change_5m < -2:
-                bear_score += 0.08
+        # === MOMENTUM SIGNALS (scaled by overextension) ===
+        # 5m momentum (most recent)
+        if change_5m > 2:
+            bull_score += 0.10 * momentum_scale
+        elif change_5m < -2:
+            bear_score += 0.10 * momentum_scale
 
-            # 1h momentum (short-term trend)
-            if change_1h > 3:
-                bull_score += 0.15
-            elif change_1h > 0:
-                bull_score += 0.05
-            elif change_1h < -3:
-                bear_score += 0.15
-            elif change_1h < 0:
-                bear_score += 0.05
+        # 1h momentum (short-term trend)
+        if change_1h > 3:
+            bull_score += 0.20 * momentum_scale
+        elif change_1h > 0:
+            bull_score += 0.08 * momentum_scale
+        elif change_1h < -3:
+            bear_score += 0.20 * momentum_scale
+        elif change_1h < 0:
+            bear_score += 0.08 * momentum_scale
 
-            # 24h momentum (medium-term)
-            if change_24h > 5:
-                bull_score += 0.10
-            elif change_24h < -5:
-                bear_score += 0.10
+        # 24h momentum (medium-term)
+        if change_24h > 5:
+            bull_score += 0.15 * momentum_scale
+        elif change_24h < -5:
+            bear_score += 0.15 * momentum_scale
 
-            # Trend alignment bonus (only when moderate)
-            if change_1h > 0 and change_24h > 0 and change_5m > 0:
-                bull_score += 0.10
-            elif change_1h < 0 and change_24h < 0 and change_5m < 0:
-                bear_score += 0.10
+        # Trend alignment bonus
+        if change_1h > 0 and change_24h > 0 and change_5m > 0:
+            bull_score += 0.10 * momentum_scale
+        elif change_1h < 0 and change_24h < 0 and change_5m < 0:
+            bear_score += 0.10 * momentum_scale
 
         # === REVERSAL PATTERNS (high priority) ===
         # Big 24h drop + 1h bounce = potential long (mean reversion)
