@@ -191,27 +191,38 @@ def format_trade_analysis(signal: TradeSignal) -> str:
     if risk.max_loss_usd > 0:
         lines.append(f"  Max Loss: ${risk.max_loss_usd:,.2f}")
 
-    # Technical signals
+    # Technical signals — show top signals, grouped by timeframe
     if signal.technical_signals:
         lines.append("")
         lines.append("Technical Signals:")
-        for ts in signal.technical_signals:
+
+        # Sort by weight (most important first), limit to top 8
+        sorted_signals = sorted(signal.technical_signals,
+                               key=lambda s: s.weight, reverse=True)[:8]
+
+        for ts in sorted_signals:
             lines.append(f"  {ts.name}: {ts.observation}")
             if ts.significance:
-                lines.append(f"  └ {ts.significance}")
+                # Truncate long significance text
+                sig_text = ts.significance[:120]
+                if len(ts.significance) > 120:
+                    sig_text += "..."
+                lines.append(f"  └ {sig_text}")
 
     # On-chain signals
     if signal.onchain_signals:
         lines.append("")
         lines.append("On-Chain Signals:")
-        for os_sig in signal.onchain_signals:
+        for os_sig in signal.onchain_signals[:3]:  # Limit to 3
             lines.append(f"  {os_sig.get('name', 'Signal')}: "
                         f"{os_sig.get('observation', '')}")
 
     # Market structure
     if signal.market_structure_summary:
         lines.append("")
-        lines.append(f"Market Structure: {signal.market_structure_summary}")
+        # Truncate market structure if too long
+        ms_text = signal.market_structure_summary[:200]
+        lines.append(f"Market Structure: {ms_text}")
 
     # Trap detection
     td = signal.trap_detection
@@ -234,17 +245,26 @@ def format_trade_analysis(signal: TradeSignal) -> str:
         else:
             lines.append(f"Crime Pump: {signal.crime_pump_status.value}")
 
-    # Reasoning
+    # Reasoning — truncate
     if signal.reasoning_summary:
         lines.append("")
-        lines.append(f"Reasoning: {signal.reasoning_summary}")
+        reasoning = signal.reasoning_summary[:250]
+        if len(signal.reasoning_summary) > 250:
+            reasoning += "..."
+        lines.append(f"Reasoning: {reasoning}")
 
     # Framework attribution
     if signal.contributing_frameworks:
         lines.append("")
         lines.append(f"Sources: {', '.join(signal.contributing_frameworks)}")
 
-    return "\n".join(lines)
+    result = "\n".join(lines)
+
+    # Hard cap: Telegram max is 4096 chars
+    if len(result) > 4000:
+        result = result[:3950] + "\n\n... (truncated)"
+
+    return result
 
 
 def format_scan_summary(tokens_scanned: int, alerts_generated: int,
