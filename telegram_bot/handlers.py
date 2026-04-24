@@ -23,6 +23,7 @@ from telegram_bot.keyboards import (
     get_trade_analysis_keyboard,
     get_scan_summary_keyboard,
     get_watchlist_keyboard,
+    get_positions_keyboard,
 )
 from utils.logger import get_logger
 from utils.database import get_active_watchlist, add_to_watchlist, get_recent_alerts
@@ -499,6 +500,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif data.startswith("cancel_trade:"):
         await query.edit_message_text("❌ Trade cancelled.")
 
+    elif data == "refresh_positions":
+        await _handle_refresh_positions(query)
+
     elif data.startswith("watchlist_add:"):
         token_symbol = data.split(":", 1)[1]
         try:
@@ -615,7 +619,7 @@ async def _handle_execute_trade(query, token_symbol: str) -> None:
             token_symbol, signal, token
         )
 
-        # Build confirmation message
+        # Build Bybit-style confirmation message
         mode = "📝 PAPER" if _execution_engine.paper_trading else "🔴 LIVE"
         direction_emoji = "📈" if signal.direction.value == "long" else "📉"
         direction = signal.direction.value.upper()
@@ -623,18 +627,47 @@ async def _handle_execute_trade(query, token_symbol: str) -> None:
         entry = signal.risk.entry_price
         sl = signal.risk.stop_loss
         tp1 = signal.risk.take_profit_1
+        tp2 = signal.risk.take_profit_2
+        leverage = signal.risk.leverage or 3
+        rr = signal.risk.risk_reward
+        confidence = signal.confidence
+        sl_pct = abs(entry - sl) / entry * 100 if entry > 0 else 0
 
         price_fmt = lambda p: f"${p:,.6f}" if p < 1 else f"${p:,.2f}"
 
+        # Calculate estimated order cost and liq price
+        pos_size_pct = signal.risk.position_size_pct
+        portfolio = _execution_engine.risk_manager.portfolio_value
+        order_cost = pos_size_pct * portfolio / 100
+
+        # Liq price estimate (Bybit-style with 2.5% MMR for altcoins)
+        mmr = 0.025
+        fee = 0.0006
+        imr = 1.0 / leverage
+        if direction == "LONG":
+            liq_price = entry * (1 - imr + mmr + fee)
+        else:
+            liq_price = entry * (1 + imr - mmr - fee)
+
         confirm_msg = (
-            f"⚠️ TRADE CONFIRMATION ({mode})\n\n"
+            f"⚠️ TRADE CONFIRMATION ({mode})\n"
+            f"{'=' * 30}\n\n"
             f"Token: ${token_symbol}\n"
             f"Direction: {direction_emoji} {direction}\n"
-            f"Entry: {price_fmt(entry)}\n"
-            f"Stop Loss: {price_fmt(sl)}\n"
-            f"Take Profit 1: {price_fmt(tp1)}\n"
-            f"Leverage: {signal.risk.leverage or 3}x\n"
-            f"Confidence: {signal.confidence:.0%}\n\n"
+            f"Order Type: Market\n\n"
+            f"💰 Order Details:\n"
+            f"  Entry Price: {price_fmt(entry)}\n"
+            f"  Order Cost: ~${order_cost:.2f} USDT\n"
+            f"  Leverage: {leverage}x (Isolated)\n\n"
+            f"🛡️ Risk Management:\n"
+            f"  Stop Loss: {price_fmt(sl)} ({sl_pct:.1f}% away)\n"
+            f"  Take Profit 1: {price_fmt(tp1)}\n"
+            f"  Take Profit 2: {price_fmt(tp2)}\n"
+            f"  Risk/Reward: {rr:.1f}:1\n\n"
+            f"📊 Position Info:\n"
+            f"  Est. Liq. Price: {price_fmt(liq_price)}\n"
+            f"  Confidence: {confidence:.0%}\n"
+            f"  Position Size: {pos_size_pct:.1f}% of portfolio\n\n"
         )
 
         if _execution_engine.paper_trading:
@@ -734,6 +767,53 @@ async def _handle_confirm_trade(query, confirm_id: str) -> None:
     except Exception as e:
         log.error("confirm_trade_error", error=str(e))
         await query.edit_message_text(f"❌ Execution failed: {str(e)[:200]}")
+
+async def _handle_refresh_positions(query) -> None:
+    """Handle the refresh button on /positions. Re-fetches and displays current positions."""
+    if _position_monitor is None:
+        await query.edit_message_text("Position monitor not initialized.")
+        return
+
+    try:
+        active = _position_monitor.active_positions
+        if not active:
+            await query.edit_message_text(
+                "No active positions being tracked.\n"
+                "Use /track [ticker] [entry] [sl] [tp] to start monitoring."
+            )
+            return
+
+        lines = [f"📋 Tracked Positions ({len(active)})\n"]
+
+        for pos in active:
+            pnl_emoji = "🟢" if pos.pnl_pct >= 0 else "🔴"
+            entry_str = f"${pos.entry_price:.6f}" if pos.entry_price < 1 else f"${pos.entry_price:,.2f}"
+            current_str = f"${pos.current_price:.6f}" if pos.current_price < 1 else f"${pos.current_price:,.2f}"
+
+            lines.append(f"{pnl_emoji} ${pos.symbol} ({pos.direction})")
+            lines.append(f"  Entry: {entry_str}")
+            lines.append(f"  Current: {current_str}")
+            lines.append(f"  PnL: {pos.pnl_pct:+.1f}%")
+            if pos.leverage > 1:
+                lines.append(f"  Leverage: {pos.leverage}x")
+            if pos.stop_loss > 0:
+                sl_str = f"${pos.stop_loss:.6f}" if pos.stop_loss < 1 else f"${pos.stop_loss:,.2f}"
+                lines.append(f"  SL: {sl_str}")
+            if pos.take_profit_1 > 0:
+                tp_str = f"${pos.take_profit_1:.6f}" if pos.take_profit_1 < 1 else f"${pos.take_profit_1:,.2f}"
+                lines.append(f"  TP: {tp_str}")
+            lines.append("")
+
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+        lines.append(f"🕐 Updated: {now}")
+
+        keyboard = get_positions_keyboard()
+        await query.edit_message_text("\n".join(lines), reply_markup=keyboard)
+
+    except Exception as e:
+        log.error("refresh_positions_error", error=str(e))
+        await query.edit_message_text(f"Error refreshing positions: {str(e)[:200]}")
 
 
 async def _handle_refresh(query, token_symbol: str) -> None:
@@ -997,7 +1077,8 @@ async def positions_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             lines.append(f"  TP: {tp_str}")
         lines.append("")
 
-    await update.message.reply_text("\n".join(lines))
+    keyboard = get_positions_keyboard()
+    await update.message.reply_text("\n".join(lines), reply_markup=keyboard)
 
 
 async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

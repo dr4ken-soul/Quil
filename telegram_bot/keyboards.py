@@ -98,3 +98,16 @@ def get_watchlist_keyboard() -> InlineKeyboardMarkup:
         ],
     ]
     return InlineKeyboardMarkup(buttons)
+
+
+def get_positions_keyboard() -> InlineKeyboardMarkup:
+    """Build keyboard for /positions view with refresh button."""
+    buttons = [
+        [
+            InlineKeyboardButton(
+                "🔄 Refresh",
+                callback_data="refresh_positions"
+            ),
+        ],
+    ]
+    return InlineKeyboardMarkup(buttons)
