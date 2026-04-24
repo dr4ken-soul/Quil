@@ -504,6 +504,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif data.startswith("cancel_trade:"):
         await query.edit_message_text("❌ Trade cancelled.")
 
+    elif data.startswith("confirm_limit:"):
+        confirm_id = data.split(":", 1)[1]
+        await _handle_confirm_limit_trade(query, confirm_id)
+
     elif data == "refresh_positions":
         await _handle_refresh_positions(query)
 
@@ -653,14 +657,19 @@ async def _handle_execute_trade(query, token_symbol: str) -> None:
         else:
             liq_price = entry * (1 + imr - mmr - fee)
 
+        # Calculate optimal limit entry
+        limit_calc = _execution_engine.calculate_optimal_entry(signal, token)
+        limit_price = limit_calc["limit_price"]
+        limit_offset = limit_calc["offset_pct"]
+
         confirm_msg = (
             f"⚠️ TRADE CONFIRMATION ({mode})\n"
             f"{'=' * 30}\n\n"
             f"Token: ${token_symbol}\n"
-            f"Direction: {direction_emoji} {direction}\n"
-            f"Order Type: Market\n\n"
+            f"Direction: {direction_emoji} {direction}\n\n"
             f"💰 Order Details:\n"
-            f"  Entry Price: {price_fmt(entry)}\n"
+            f"  Market Price: {price_fmt(entry)}\n"
+            f"  Limit Price: {price_fmt(limit_price)} ({limit_offset:.1f}% better)\n"
             f"  Order Cost: ~${order_cost:.2f} USDT\n"
             f"  Leverage: {leverage}x (Isolated)\n\n"
             f"🛡️ Risk Management:\n"
@@ -685,9 +694,15 @@ async def _handle_execute_trade(query, token_symbol: str) -> None:
         buttons = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(
-                    "✅ Confirm & Execute",
+                    "⚡ Market Order",
                     callback_data=f"confirm_trade:{confirm_id}"
                 ),
+                InlineKeyboardButton(
+                    f"📊 Limit Order",
+                    callback_data=f"confirm_limit:{confirm_id}"
+                ),
+            ],
+            [
                 InlineKeyboardButton(
                     "❌ Cancel",
                     callback_data=f"cancel_trade:{confirm_id}"
@@ -771,6 +786,88 @@ async def _handle_confirm_trade(query, confirm_id: str) -> None:
     except Exception as e:
         log.error("confirm_trade_error", error=str(e))
         await query.edit_message_text(f"❌ Execution failed: {str(e)[:200]}")
+
+
+async def _handle_confirm_limit_trade(query, confirm_id: str) -> None:
+    """Handle limit order confirmation. Places a limit order instead of market."""
+    if _execution_engine is None:
+        await query.edit_message_text("Execution engine not initialized.")
+        return
+
+    try:
+        pending = _execution_engine.get_pending_trade(confirm_id)
+        if pending is None:
+            await query.edit_message_text(
+                "⏰ Trade confirmation expired (5 minute limit). "
+                "Run /trade again to get a fresh signal."
+            )
+            return
+
+        signal = pending["signal"]
+        token = pending["token"]
+
+        await query.edit_message_text(
+            f"📊 Placing LIMIT order for ${signal.token_symbol}...\n"
+            f"Calculating optimal entry..."
+        )
+
+        result = await _execution_engine.execute_limit_trade(signal, token)
+
+        if result.get("executed"):
+            mode = result.get("mode", "paper")
+            limit_price = result.get("limit_price", 0)
+            market_price = result.get("market_price", 0)
+            offset = result.get("offset_pct", 0)
+
+            price_fmt = lambda p: f"${p:,.6f}" if p < 1 else f"${p:,.2f}"
+
+            if mode == "paper":
+                msg = (
+                    f"📝 Paper LIMIT Order Placed\n\n"
+                    f"Token: ${signal.token_symbol}\n"
+                    f"Direction: {signal.direction.value.upper()}\n"
+                    f"Limit Price: {price_fmt(limit_price)}\n"
+                    f"Market Price: {price_fmt(market_price)}\n"
+                    f"Offset: {offset:.1f}% better entry\n"
+                    f"SL: {price_fmt(result.get('sl', 0))}\n"
+                    f"TP: {price_fmt(result.get('tp1', 0))}\n\n"
+                    f"Position auto-tracked. Use /positions to monitor."
+                )
+            else:
+                timeout = result.get("timeout_minutes", 15)
+                msg = (
+                    f"📊 LIVE Limit Order Placed\n\n"
+                    f"Exchange: {result.get('exchange', 'unknown')}\n"
+                    f"Token: ${signal.token_symbol}\n"
+                    f"Direction: {signal.direction.value.upper()}\n"
+                    f"Limit Price: {price_fmt(limit_price)}\n"
+                    f"Market Price: {price_fmt(market_price)}\n"
+                    f"Offset: {offset:.1f}% better entry\n"
+                    f"Amount: {result.get('amount', 0):,.4f}\n"
+                    f"Leverage: {result.get('leverage', 0)}x\n"
+                    f"Order ID: {result.get('order_id', 'N/A')}\n\n"
+                    f"⏱️ Auto-cancels in {timeout} min if not filled.\n"
+                    f"SL/TP will be placed automatically after fill.\n"
+                    f"Use /positions to monitor."
+                )
+
+            warnings = result.get("warnings", [])
+            if warnings:
+                msg += "\n⚠️ Warnings:\n" + "\n".join(f"- {w}" for w in warnings)
+
+            await query.edit_message_text(msg)
+        else:
+            reason = result.get("reason", "Unknown error")
+            rejections = result.get("rejections", [])
+            msg = f"❌ Limit Order NOT Placed\n\nReason: {reason}"
+            if rejections:
+                msg += "\n\nRejections:\n" + "\n".join(f"- {r}" for r in rejections)
+            await query.edit_message_text(msg)
+
+    except Exception as e:
+        log.error("confirm_limit_trade_error", error=str(e))
+        await query.edit_message_text(f"❌ Limit order failed: {str(e)[:200]}")
+
 
 async def _handle_refresh_positions(query) -> None:
     """Handle the refresh button on /positions. Re-fetches and displays current positions."""

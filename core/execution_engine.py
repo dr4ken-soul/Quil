@@ -665,12 +665,405 @@ class ExecutionEngine:
             return {}
         return {}
 
+    def calculate_optimal_entry(self, signal: TradeSignal, token: Token) -> dict:
+        """
+        Calculate an optimal limit entry price based on the signal direction
+        and recent price action. Instead of entering at market price, we try
+        to get a better fill by placing the limit slightly into a
+        support (for longs) or resistance (for shorts).
+
+        Returns dict with:
+          - limit_price: the recommended limit price
+          - offset_pct: how far from market price (%)
+          - reasoning: why this price was chosen
+        """
+        price = token.metrics.price
+        if price <= 0:
+            return {"limit_price": price, "offset_pct": 0, "reasoning": "No price data"}
+
+        change_1h = abs(token.metrics.price_change_1h)
+        change_5m = abs(token.metrics.price_change_5m)
+        confidence = signal.confidence
+
+        # Base offset: more volatile = bigger offset to catch a better fill
+        # Higher confidence = smaller offset (enter quicker)
+        if change_1h > 5:
+            base_offset = 0.8  # Volatile — wait for 0.8% pullback
+        elif change_1h > 2:
+            base_offset = 0.5  # Normal volatility — 0.5% offset
+        else:
+            base_offset = 0.3  # Low volatility — tight 0.3% offset
+
+        # Confidence adjustment
+        if confidence >= 0.7:
+            base_offset *= 0.6  # High confidence = enter closer to market
+        elif confidence >= 0.5:
+            base_offset *= 0.8
+        # Low confidence keeps full offset
+
+        # 5m momentum adjustment — if price is moving fast in our direction,
+        # reduce offset so we don't miss the move
+        if change_5m > 3:
+            base_offset *= 0.5  # Price is running, get in quicker
+
+        # Clamp
+        base_offset = max(base_offset, 0.1)  # At least 0.1% better than market
+        base_offset = min(base_offset, 1.5)  # No more than 1.5% away
+
+        # Calculate limit price
+        if signal.direction == Direction.LONG:
+            # For longs: buy slightly below market (wait for a dip)
+            limit_price = price * (1 - base_offset / 100)
+            reasoning = f"Limit buy {base_offset:.1f}% below market for better long entry"
+        else:
+            # For shorts: sell slightly above market (wait for a bounce)
+            limit_price = price * (1 + base_offset / 100)
+            reasoning = f"Limit sell {base_offset:.1f}% above market for better short entry"
+
+        # Round to appropriate precision
+        if price < 0.01:
+            limit_price = round(limit_price, 8)
+        elif price < 1:
+            limit_price = round(limit_price, 6)
+        elif price < 100:
+            limit_price = round(limit_price, 4)
+        else:
+            limit_price = round(limit_price, 2)
+
+        return {
+            "limit_price": limit_price,
+            "offset_pct": round(base_offset, 2),
+            "reasoning": reasoning,
+            "market_price": price,
+            "direction": signal.direction.value,
+        }
+
+    async def execute_limit_trade(self, signal: TradeSignal, token: Token,
+                                   limit_price: float = None,
+                                   exchange_name: str = None,
+                                   timeout_minutes: int = 15,
+                                   position_size_usd: float = None) -> dict:
+        """
+        Execute a trade using a LIMIT order instead of market.
+
+        If limit_price is not provided, calculates optimal entry automatically.
+        Places SL/TP after the limit order is filled.
+        If not filled within timeout_minutes, cancels the order.
+        """
+        # Calculate optimal entry if not provided
+        if limit_price is None:
+            entry_calc = self.calculate_optimal_entry(signal, token)
+            limit_price = entry_calc["limit_price"]
+        else:
+            entry_calc = {"limit_price": limit_price, "offset_pct": 0,
+                         "reasoning": "User-specified limit price"}
+
+        # Run risk validation
+        risk_check = self.risk_manager.validate_trade(signal, token)
+        if not risk_check["approved"]:
+            return {
+                "executed": False,
+                "mode": "paper" if self.paper_trading else "live",
+                "reason": "Risk check failed",
+                "rejections": risk_check["rejections"],
+                "signal": signal,
+            }
+
+        adjusted_signal = risk_check["adjusted_signal"]
+
+        # Override entry price with our limit price
+        adjusted_signal.risk.entry_price = limit_price
+
+        # Recalculate SL/TP based on new entry
+        sl_pct = abs(signal.risk.entry_price - signal.risk.stop_loss) / signal.risk.entry_price
+        rr = signal.risk.risk_reward or 2.0
+
+        if adjusted_signal.direction == Direction.LONG:
+            adjusted_signal.risk.stop_loss = round(limit_price * (1 - sl_pct), 8)
+            adjusted_signal.risk.take_profit_1 = round(limit_price * (1 + sl_pct * rr), 8)
+            adjusted_signal.risk.take_profit_2 = round(limit_price * (1 + sl_pct * rr * 1.5), 8)
+        else:
+            adjusted_signal.risk.stop_loss = round(limit_price * (1 + sl_pct), 8)
+            adjusted_signal.risk.take_profit_1 = round(limit_price * (1 - sl_pct * rr), 8)
+            adjusted_signal.risk.take_profit_2 = round(limit_price * (1 - sl_pct * rr * 1.5), 8)
+
+        # Save signal to database
+        signal_data = {
+            "token_symbol": adjusted_signal.token_symbol,
+            "direction": adjusted_signal.direction.value,
+            "confidence": adjusted_signal.confidence,
+            "timeframe": adjusted_signal.timeframe,
+            "entry_price": limit_price,
+            "stop_loss": adjusted_signal.risk.stop_loss,
+            "take_profit_1": adjusted_signal.risk.take_profit_1,
+            "take_profit_2": adjusted_signal.risk.take_profit_2,
+            "risk_reward": adjusted_signal.risk.risk_reward,
+            "technical_signals": [
+                {"name": s.name, "observation": s.observation}
+                for s in adjusted_signal.technical_signals
+            ],
+            "onchain_signals": adjusted_signal.onchain_signals,
+            "trap_detection": {
+                "regime": adjusted_signal.trap_detection.regime.value,
+                "trap_fired": adjusted_signal.trap_detection.trap_fired.value,
+                "confidence": adjusted_signal.trap_detection.confidence,
+                "gate_trace": adjusted_signal.trap_detection.gate_trace,
+            },
+            "crime_pump_status": adjusted_signal.crime_pump_status.value,
+            "reasoning": adjusted_signal.reasoning_summary,
+            "framework_source": ", ".join(adjusted_signal.contributing_frameworks),
+        }
+
+        try:
+            signal_id = await save_trade_signal(signal_data)
+        except Exception as e:
+            log.error("signal_save_error", error=str(e))
+            signal_id = None
+
+        # Paper trading mode
+        if self.paper_trading:
+            log.info("paper_limit_trade",
+                    token=adjusted_signal.token_symbol,
+                    direction=adjusted_signal.direction.value,
+                    limit_price=limit_price,
+                    market_price=token.metrics.price)
+
+            self.risk_manager.record_trade_open(adjusted_signal, token)
+            position_id = await self._auto_track_position(adjusted_signal, "paper",
+                                                          fill_price=limit_price)
+
+            return {
+                "executed": True,
+                "mode": "paper",
+                "order_type": "limit",
+                "order_id": f"PAPER-LIMIT-{signal_id or 'unknown'}",
+                "limit_price": limit_price,
+                "market_price": token.metrics.price,
+                "offset_pct": entry_calc.get("offset_pct", 0),
+                "sl": adjusted_signal.risk.stop_loss,
+                "tp1": adjusted_signal.risk.take_profit_1,
+                "signal": adjusted_signal,
+                "position_id": position_id,
+                "warnings": risk_check.get("warnings", []),
+                "message": f"📝 Paper LIMIT order placed at ${limit_price}. "
+                           f"({entry_calc.get('reasoning', '')})",
+            }
+
+        # === LIVE LIMIT ORDER ===
+        if not exchange_name:
+            exchange_name = self._select_exchange(token)
+
+        if exchange_name not in self._exchanges:
+            return {
+                "executed": False,
+                "mode": "live",
+                "reason": f"Exchange '{exchange_name}' not connected.",
+                "signal": adjusted_signal,
+            }
+
+        exchange = self._exchanges[exchange_name]
+
+        try:
+            # Calculate trade amount
+            if position_size_usd:
+                trade_value = position_size_usd
+            else:
+                trade_value = (
+                    self.risk_manager.portfolio_value *
+                    adjusted_signal.risk.position_size_pct / 100
+                )
+            if trade_value <= 0:
+                trade_value = 10.0
+
+            symbol = f"{token.symbol}/USDT"
+            leverage = adjusted_signal.risk.leverage or 3
+            side = "buy" if adjusted_signal.direction == Direction.LONG else "sell"
+            amount = trade_value / limit_price
+
+            # Set leverage
+            await self._set_leverage(exchange, exchange_name, symbol, leverage)
+
+            # Place LIMIT order
+            log.info("placing_limit_order",
+                    exchange=exchange_name, symbol=symbol,
+                    side=side, price=limit_price, amount=amount)
+
+            order = await exchange.create_order(
+                symbol=symbol,
+                type="limit",
+                side=side,
+                amount=amount,
+                price=limit_price,
+                params=self._get_order_params(exchange_name, "limit"),
+            )
+
+            order_id = order.get("id", "unknown")
+
+            log.info("limit_order_placed",
+                    order_id=order_id, price=limit_price, amount=amount)
+
+            # Store order info for monitoring
+            self._active_orders[f"LIMIT-{token.symbol}"] = {
+                "order_id": order_id,
+                "exchange": exchange_name,
+                "symbol": symbol,
+                "side": side,
+                "limit_price": limit_price,
+                "amount": amount,
+                "leverage": leverage,
+                "direction": adjusted_signal.direction.value,
+                "signal": adjusted_signal,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timeout_minutes": timeout_minutes,
+                "status": "pending",
+            }
+
+            # Start monitoring in the background
+            asyncio.create_task(
+                self._monitor_limit_order(
+                    token.symbol, order_id, exchange_name, symbol,
+                    adjusted_signal, amount, timeout_minutes
+                )
+            )
+
+            return {
+                "executed": True,
+                "mode": "live",
+                "order_type": "limit",
+                "exchange": exchange_name,
+                "order_id": order_id,
+                "limit_price": limit_price,
+                "market_price": token.metrics.price,
+                "offset_pct": entry_calc.get("offset_pct", 0),
+                "amount": amount,
+                "leverage": leverage,
+                "timeout_minutes": timeout_minutes,
+                "signal": adjusted_signal,
+                "warnings": risk_check.get("warnings", []),
+                "message": f"Limit order placed at ${limit_price}. "
+                           f"Will auto-cancel in {timeout_minutes}min if not filled.",
+            }
+
+        except Exception as e:
+            log.error("limit_order_failed",
+                     token=adjusted_signal.token_symbol, error=str(e))
+            return {
+                "executed": False,
+                "mode": "live",
+                "order_type": "limit",
+                "reason": str(e),
+                "signal": adjusted_signal,
+            }
+
+    async def _monitor_limit_order(self, token_symbol: str, order_id: str,
+                                    exchange_name: str, symbol: str,
+                                    signal: TradeSignal, amount: float,
+                                    timeout_minutes: int = 15) -> None:
+        """
+        Background task to monitor a limit order.
+        - Checks every 30 seconds if it's been filled
+        - If filled: places SL/TP orders and auto-tracks the position
+        - If not filled after timeout: cancels the order
+        """
+        exchange = self._exchanges.get(exchange_name)
+        if not exchange:
+            return
+
+        check_interval = 30  # seconds
+        max_checks = (timeout_minutes * 60) // check_interval
+
+        for i in range(max_checks):
+            await asyncio.sleep(check_interval)
+
+            try:
+                order = await exchange.fetch_order(order_id, symbol)
+                status = order.get("status", "open")
+
+                if status == "closed":
+                    # ORDER FILLED
+                    fill_price = order.get("average") or order.get("price") or signal.risk.entry_price
+                    filled_amount = order.get("filled") or amount
+
+                    log.info("limit_order_filled",
+                            token=token_symbol, price=fill_price,
+                            amount=filled_amount)
+
+                    # Place SL/TP
+                    sl_id = await self._place_stop_loss(
+                        exchange, exchange_name, symbol, signal, filled_amount
+                    )
+                    tp_id = await self._place_take_profit(
+                        exchange, exchange_name, symbol, signal, filled_amount
+                    )
+
+                    # Track position
+                    signal.executed = True
+                    signal.execution_price = fill_price
+                    signal.execution_time = datetime.now(timezone.utc)
+                    self.risk_manager.record_trade_open(signal, None)
+                    await self._auto_track_position(signal, exchange_name,
+                                                    fill_price=fill_price)
+
+                    # Update stored order
+                    key = f"LIMIT-{token_symbol}"
+                    if key in self._active_orders:
+                        self._active_orders[key]["status"] = "filled"
+                        # Move to regular active orders
+                        self._active_orders[token_symbol] = {
+                            "main_order": order_id,
+                            "sl_order": sl_id,
+                            "tp_order": tp_id,
+                            "exchange": exchange_name,
+                            "symbol": symbol,
+                            "direction": signal.direction.value,
+                            "amount": filled_amount,
+                            "entry_price": fill_price,
+                            "leverage": signal.risk.leverage or 3,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                        del self._active_orders[key]
+
+                    log.info("limit_order_complete",
+                            token=token_symbol, sl=sl_id, tp=tp_id)
+                    return
+
+                elif status == "canceled":
+                    log.info("limit_order_already_cancelled", token=token_symbol)
+                    key = f"LIMIT-{token_symbol}"
+                    if key in self._active_orders:
+                        self._active_orders[key]["status"] = "cancelled"
+                    return
+
+            except Exception as e:
+                log.warning("limit_order_check_failed",
+                           token=token_symbol, error=str(e))
+
+        # TIMEOUT — cancel the order
+        try:
+            await exchange.cancel_order(order_id, symbol)
+            log.info("limit_order_timeout_cancelled",
+                    token=token_symbol, minutes=timeout_minutes)
+
+            key = f"LIMIT-{token_symbol}"
+            if key in self._active_orders:
+                self._active_orders[key]["status"] = "timeout_cancelled"
+
+        except Exception as e:
+            log.warning("limit_cancel_failed", token=token_symbol, error=str(e))
+
     def get_execution_status(self) -> dict:
         """Get current execution engine status."""
+        # Count limit orders
+        limit_orders = sum(
+            1 for k, v in self._active_orders.items()
+            if k.startswith("LIMIT-") and v.get("status") == "pending"
+        )
+
         return {
             "paper_trading": self.paper_trading,
             "connected_exchanges": list(self._exchanges.keys()),
             "active_orders": len(self._active_orders),
+            "pending_limit_orders": limit_orders,
             "pending_confirmations": len(self._pending_trades),
             "risk_summary": self.risk_manager.get_risk_summary(),
         }

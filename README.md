@@ -21,7 +21,7 @@ Autonomous crypto trading bot with a four-layer crime pump detection system, exp
 | 11.5 | Supabase PostgreSQL + position tracking fix | ✅ Complete |
 | 12 | Performance dashboard (/stats) | ✅ Complete |
 | — | **Deployed on Railway (24/7)** | ✅ Live |
-| 13 | Smart limit orders (optimal entry) | ❌ Next |
+| 13 | Smart limit orders (optimal entry) | ✅ Complete |
 
 ## Three Main Features
 
