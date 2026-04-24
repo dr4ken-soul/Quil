@@ -328,10 +328,17 @@ class BacktestEngine:
 
     async def _fetch_historical_candles(self, symbol: str, days: int) -> list[dict]:
         """
-        Fetch historical OHLCV data from CoinGecko (free API).
+        Fetch historical OHLCV data.
+        Priority: Bybit kline API → CoinGecko (with dynamic search).
         Returns list of candle dicts with timestamp, open, high, low, close, volume.
         """
+        import aiohttp
         session = await self._get_session()
+
+        # Try Bybit first (most accurate, no hardcoded mapping needed)
+        bybit_candles = await self._fetch_bybit_historical(symbol, days, session)
+        if bybit_candles and len(bybit_candles) >= 5:
+            return bybit_candles
 
         # Map common symbols to CoinGecko IDs
         symbol_map = {
@@ -350,7 +357,14 @@ class BacktestEngine:
             "TRUMP": "official-trump", "ZAMA": "zama",
         }
 
-        coin_id = symbol_map.get(symbol.upper(), symbol.lower())
+        coin_id = symbol_map.get(symbol.upper())
+
+        # If not in map, search CoinGecko dynamically
+        if not coin_id:
+            coin_id = await self._resolve_coingecko_id(symbol, session)
+
+        if not coin_id:
+            coin_id = symbol.lower()  # Last resort
 
         try:
             url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
@@ -359,7 +373,6 @@ class BacktestEngine:
             async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    # CoinGecko OHLC format: [timestamp, open, high, low, close]
                     candles = []
                     for point in data:
                         if len(point) >= 5:
@@ -369,9 +382,10 @@ class BacktestEngine:
                                 "high": point[2],
                                 "low": point[3],
                                 "close": point[4],
-                                "volume": 0,  # OHLC endpoint doesn't include volume
+                                "volume": 0,
                             })
-                    return candles
+                    if candles:
+                        return candles
                 else:
                     log.warning("coingecko_ohlc_failed", status=resp.status, coin=coin_id)
 
@@ -391,7 +405,7 @@ class BacktestEngine:
                         candles.append({
                             "timestamp": ts,
                             "open": price,
-                            "high": price * 1.01,  # Approximate
+                            "high": price * 1.01,
                             "low": price * 0.99,
                             "close": price,
                             "volume": vol,
@@ -400,6 +414,100 @@ class BacktestEngine:
 
         except Exception as e:
             log.error("historical_fetch_error", error=str(e), symbol=symbol)
+
+        return []
+
+    async def _resolve_coingecko_id(self, symbol: str, session) -> str:
+        """Dynamically search CoinGecko to find the correct coin ID for a symbol."""
+        import aiohttp
+        ticker = symbol.upper().replace("$", "")
+
+        try:
+            search_url = "https://api.coingecko.com/api/v3/search"
+            async with session.get(
+                search_url,
+                params={"query": ticker},
+                timeout=aiohttp.ClientTimeout(total=8),
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+
+            coins = data.get("coins", [])
+            for coin in coins:
+                if coin.get("symbol", "").upper() == ticker:
+                    coin_id = coin.get("id")
+                    log.info("coingecko_id_resolved", symbol=ticker, coin_id=coin_id)
+                    return coin_id
+
+            if coins:
+                return coins[0].get("id")
+
+        except Exception as e:
+            log.warning("coingecko_search_failed", symbol=ticker, error=str(e))
+
+        return None
+
+    async def _fetch_bybit_historical(self, symbol: str, days: int, session) -> list[dict]:
+        """Fetch historical candles from Bybit public API."""
+        import aiohttp
+        ticker = symbol.upper().replace("$", "")
+
+        if len(ticker) > 10 or ticker.startswith("0X"):
+            return []
+
+        bybit_symbol = f"{ticker}USDT"
+
+        # Choose interval based on days
+        if days <= 2:
+            interval = "60"     # 1h candles for short backtests
+            limit = min(days * 24, 200)
+        elif days <= 14:
+            interval = "240"    # 4h candles
+            limit = min(days * 6, 200)
+        else:
+            interval = "D"      # Daily candles
+            limit = min(days, 200)
+
+        try:
+            url = "https://api.bybit.com/v5/market/kline"
+
+            # Try linear (perpetual) first
+            for category in ["linear", "spot"]:
+                async with session.get(
+                    url,
+                    params={
+                        "category": category,
+                        "symbol": bybit_symbol,
+                        "interval": interval,
+                        "limit": limit,
+                    },
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status != 200:
+                        continue
+
+                    data = await resp.json()
+                    klines = data.get("result", {}).get("list", [])
+
+                    if klines:
+                        candles = []
+                        for k in reversed(klines):
+                            candles.append({
+                                "timestamp": int(k[0]),
+                                "open": float(k[1]),
+                                "high": float(k[2]),
+                                "low": float(k[3]),
+                                "close": float(k[4]),
+                                "volume": float(k[5]),
+                            })
+
+                        log.info("bybit_historical_fetched", symbol=ticker,
+                                candles=len(candles), interval=interval)
+                        return candles
+
+        except Exception as e:
+            log.warning("bybit_historical_failed", symbol=ticker, error=str(e))
 
         return []
 
