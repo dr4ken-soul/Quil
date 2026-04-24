@@ -876,32 +876,91 @@ async def _handle_refresh_positions(query) -> None:
         return
 
     try:
-        active = _position_monitor.active_positions
-        if not active:
+        from utils.database import get_active_positions as db_get_positions
+
+        # Query database first
+        try:
+            db_positions = await db_get_positions()
+        except Exception:
+            db_positions = []
+
+        mem_positions = _position_monitor.active_positions if _position_monitor else []
+        mem_by_symbol = {p.symbol: p for p in mem_positions}
+
+        # Sync DB → memory
+        if _position_monitor and db_positions:
+            for dbp in db_positions:
+                sym = dbp.get("symbol", "")
+                if sym not in mem_by_symbol:
+                    _position_monitor.add_position(
+                        symbol=sym,
+                        direction=dbp.get("direction", "LONG").upper(),
+                        entry_price=dbp.get("entry_price", 0),
+                        stop_loss=dbp.get("stop_loss", 0),
+                        take_profit_1=dbp.get("take_profit_1", 0),
+                        take_profit_2=dbp.get("take_profit_2", 0),
+                        leverage=dbp.get("leverage", 1),
+                        size_usd=dbp.get("size_usd", 0),
+                    )
+            mem_positions = _position_monitor.active_positions
+            mem_by_symbol = {p.symbol: p for p in mem_positions}
+
+        if not db_positions and not mem_positions:
             await query.edit_message_text(
                 "No active positions being tracked.\n"
                 "Use /track [ticker] [entry] [sl] [tp] to start monitoring."
             )
             return
 
-        lines = [f"📋 Tracked Positions ({len(active)})\n"]
+        # Build from DB + memory
+        positions_to_show = []
+        for dbp in db_positions:
+            sym = dbp.get("symbol", "")
+            mem_pos = mem_by_symbol.get(sym)
+            positions_to_show.append({
+                "symbol": sym,
+                "direction": dbp.get("direction", "LONG").upper(),
+                "entry_price": dbp.get("entry_price", 0),
+                "current_price": mem_pos.current_price if mem_pos else dbp.get("entry_price", 0),
+                "pnl_pct": mem_pos.pnl_pct if mem_pos else 0,
+                "leverage": dbp.get("leverage", 1),
+                "stop_loss": dbp.get("stop_loss", 0),
+                "take_profit_1": dbp.get("take_profit_1", 0),
+            })
 
-        for pos in active:
-            pnl_emoji = "🟢" if pos.pnl_pct >= 0 else "🔴"
-            entry_str = f"${pos.entry_price:.6f}" if pos.entry_price < 1 else f"${pos.entry_price:,.2f}"
-            current_str = f"${pos.current_price:.6f}" if pos.current_price < 1 else f"${pos.current_price:,.2f}"
+        db_symbols = {p.get("symbol", "") for p in db_positions}
+        for mp in mem_positions:
+            if mp.symbol not in db_symbols:
+                positions_to_show.append({
+                    "symbol": mp.symbol, "direction": mp.direction,
+                    "entry_price": mp.entry_price, "current_price": mp.current_price,
+                    "pnl_pct": mp.pnl_pct, "leverage": mp.leverage,
+                    "stop_loss": mp.stop_loss, "take_profit_1": mp.take_profit_1,
+                })
 
-            lines.append(f"{pnl_emoji} ${pos.symbol} ({pos.direction})")
+        lines = [f"📋 Tracked Positions ({len(positions_to_show)})\n"]
+
+        for pos in positions_to_show:
+            entry = pos["entry_price"]
+            current = pos["current_price"]
+            pnl = pos["pnl_pct"]
+            pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+            entry_str = f"${entry:.6f}" if entry < 1 else f"${entry:,.2f}"
+            current_str = f"${current:.6f}" if current < 1 else f"${current:,.2f}"
+
+            lines.append(f"{pnl_emoji} ${pos['symbol']} ({pos['direction']})")
             lines.append(f"  Entry: {entry_str}")
             lines.append(f"  Current: {current_str}")
-            lines.append(f"  PnL: {pos.pnl_pct:+.1f}%")
-            if pos.leverage > 1:
-                lines.append(f"  Leverage: {pos.leverage}x")
-            if pos.stop_loss > 0:
-                sl_str = f"${pos.stop_loss:.6f}" if pos.stop_loss < 1 else f"${pos.stop_loss:,.2f}"
+            lines.append(f"  PnL: {pnl:+.1f}%")
+            if pos["leverage"] > 1:
+                lines.append(f"  Leverage: {pos['leverage']}x")
+            if pos["stop_loss"] > 0:
+                sl = pos["stop_loss"]
+                sl_str = f"${sl:.6f}" if sl < 1 else f"${sl:,.2f}"
                 lines.append(f"  SL: {sl_str}")
-            if pos.take_profit_1 > 0:
-                tp_str = f"${pos.take_profit_1:.6f}" if pos.take_profit_1 < 1 else f"${pos.take_profit_1:,.2f}"
+            if pos["take_profit_1"] > 0:
+                tp = pos["take_profit_1"]
+                tp_str = f"${tp:.6f}" if tp < 1 else f"${tp:,.2f}"
                 lines.append(f"  TP: {tp_str}")
             lines.append("")
 
@@ -1144,37 +1203,114 @@ async def track_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def positions_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle the /positions command. View all tracked positions."""
-    if _position_monitor is None:
-        await update.message.reply_text("Position monitor not initialized.")
-        return
+    """Handle the /positions command. View all tracked positions.
+    Reads from database first (persistent), then syncs to in-memory monitor.
+    """
+    from utils.database import get_active_positions as db_get_positions
 
-    active = _position_monitor.active_positions
-    if not active:
+    try:
+        # Always query database first (survives Railway redeploys)
+        db_positions = await db_get_positions()
+    except Exception as e:
+        log.error("db_positions_fetch_error", error=str(e))
+        db_positions = []
+
+    # Also check in-memory (has live price updates)
+    mem_positions = _position_monitor.active_positions if _position_monitor else []
+
+    # Merge: use DB as source of truth, enrich with in-memory live prices
+    mem_by_symbol = {p.symbol: p for p in mem_positions}
+
+    if not db_positions and not mem_positions:
         await update.message.reply_text(
             "No active positions being tracked.\n"
             "Use /track [ticker] [entry] [sl] [tp] to start monitoring."
         )
         return
 
-    lines = [f"📋 Tracked Positions ({len(active)})\n"]
+    # Sync DB positions into memory monitor if missing
+    if _position_monitor and db_positions:
+        for dbp in db_positions:
+            sym = dbp.get("symbol", "")
+            if sym not in mem_by_symbol:
+                _position_monitor.add_position(
+                    symbol=sym,
+                    direction=dbp.get("direction", "LONG").upper(),
+                    entry_price=dbp.get("entry_price", 0),
+                    stop_loss=dbp.get("stop_loss", 0),
+                    take_profit_1=dbp.get("take_profit_1", 0),
+                    take_profit_2=dbp.get("take_profit_2", 0),
+                    leverage=dbp.get("leverage", 1),
+                    size_usd=dbp.get("size_usd", 0),
+                )
+                log.info("position_synced_from_db", symbol=sym)
+        # Refresh in-memory list
+        mem_positions = _position_monitor.active_positions
+        mem_by_symbol = {p.symbol: p for p in mem_positions}
 
-    for pos in active:
-        pnl_emoji = "🟢" if pos.pnl_pct >= 0 else "🔴"
-        entry_str = f"${pos.entry_price:.6f}" if pos.entry_price < 1 else f"${pos.entry_price:,.2f}"
-        current_str = f"${pos.current_price:.6f}" if pos.current_price < 1 else f"${pos.current_price:,.2f}"
+    # Build display from DB positions (always complete)
+    positions_to_show = []
+    for dbp in db_positions:
+        sym = dbp.get("symbol", "")
+        mem_pos = mem_by_symbol.get(sym)
+        positions_to_show.append({
+            "symbol": sym,
+            "direction": dbp.get("direction", "LONG").upper(),
+            "entry_price": dbp.get("entry_price", 0),
+            "current_price": mem_pos.current_price if mem_pos else dbp.get("current_price", dbp.get("entry_price", 0)),
+            "pnl_pct": mem_pos.pnl_pct if mem_pos else (dbp.get("pnl_pct", 0) or 0),
+            "leverage": dbp.get("leverage", 1),
+            "stop_loss": dbp.get("stop_loss", 0),
+            "take_profit_1": dbp.get("take_profit_1", 0),
+            "size_usd": dbp.get("size_usd", 0),
+        })
 
-        lines.append(f"{pnl_emoji} ${pos.symbol} ({pos.direction})")
+    # Add any in-memory positions not in DB
+    db_symbols = {p.get("symbol", "") for p in db_positions}
+    for mp in mem_positions:
+        if mp.symbol not in db_symbols:
+            positions_to_show.append({
+                "symbol": mp.symbol,
+                "direction": mp.direction,
+                "entry_price": mp.entry_price,
+                "current_price": mp.current_price,
+                "pnl_pct": mp.pnl_pct,
+                "leverage": mp.leverage,
+                "stop_loss": mp.stop_loss,
+                "take_profit_1": mp.take_profit_1,
+                "size_usd": mp.size_usd,
+            })
+
+    if not positions_to_show:
+        await update.message.reply_text(
+            "No active positions being tracked.\n"
+            "Use /track [ticker] [entry] [sl] [tp] to start monitoring."
+        )
+        return
+
+    lines = [f"📋 Tracked Positions ({len(positions_to_show)})\n"]
+
+    for pos in positions_to_show:
+        entry = pos["entry_price"]
+        current = pos["current_price"]
+        pnl = pos["pnl_pct"]
+        pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+        entry_str = f"${entry:.6f}" if entry < 1 else f"${entry:,.2f}"
+        current_str = f"${current:.6f}" if current < 1 else f"${current:,.2f}"
+
+        lines.append(f"{pnl_emoji} ${pos['symbol']} ({pos['direction']})")
         lines.append(f"  Entry: {entry_str}")
         lines.append(f"  Current: {current_str}")
-        lines.append(f"  PnL: {pos.pnl_pct:+.1f}%")
-        if pos.leverage > 1:
-            lines.append(f"  Leverage: {pos.leverage}x")
-        if pos.stop_loss > 0:
-            sl_str = f"${pos.stop_loss:.6f}" if pos.stop_loss < 1 else f"${pos.stop_loss:,.2f}"
+        lines.append(f"  PnL: {pnl:+.1f}%")
+        if pos["leverage"] > 1:
+            lines.append(f"  Leverage: {pos['leverage']}x")
+        if pos["stop_loss"] > 0:
+            sl = pos["stop_loss"]
+            sl_str = f"${sl:.6f}" if sl < 1 else f"${sl:,.2f}"
             lines.append(f"  SL: {sl_str}")
-        if pos.take_profit_1 > 0:
-            tp_str = f"${pos.take_profit_1:.6f}" if pos.take_profit_1 < 1 else f"${pos.take_profit_1:,.2f}"
+        if pos["take_profit_1"] > 0:
+            tp = pos["take_profit_1"]
+            tp_str = f"${tp:.6f}" if tp < 1 else f"${tp:,.2f}"
             lines.append(f"  TP: {tp_str}")
         lines.append("")
 
