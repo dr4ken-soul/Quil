@@ -540,9 +540,15 @@ class BacktestEngine:
         elif days <= 7:
             interval = "240"    # 4h candles
             limit = min(days * 6, 200)
+        elif days <= 60:
+            interval = "240"    # 4h candles for medium periods
+            limit = 200         # ~33 days of 4h data
         else:
-            interval = "240"    # 4h candles (NOT daily — daily is too coarse)
-            limit = 200         # Max 200 candles = ~33 days of 4h data
+            # For long periods (90d, 180d, 365d) — use DAILY candles
+            # 4h candles max out at ~33 days. Daily candles can cover years.
+            # This is critical for crime pump backtests that need 180d+ history
+            interval = "D"      # Daily candles
+            limit = min(days, 365)  # Up to 365 daily candles
 
         try:
             url = "https://api.bybit.com/v5/market/kline"
