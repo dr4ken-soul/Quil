@@ -148,8 +148,9 @@ class BacktestEngine:
             prev_candle = candles[i - 1]
             prev2_candle = candles[i - 2]
 
-            # Build simulated token from candle data
-            token = self._candle_to_token(symbol, candle, prev_candle, prev2_candle)
+            # Build simulated token from candle data (with volatility window)
+            vol_window = candles[max(0, i - 20):i + 1]  # Last 20 candles for volatility
+            token = self._candle_to_token(symbol, candle, prev_candle, prev2_candle, candle_window=vol_window)
             timestamp = datetime.fromtimestamp(candle["timestamp"] / 1000, tz=timezone.utc)
 
             # Check if we have an active trade
@@ -593,10 +594,13 @@ class BacktestEngine:
         return []
 
     def _candle_to_token(self, symbol: str, candle: dict,
-                          prev_candle: dict, prev2_candle: dict) -> Token:
+                          prev_candle: dict, prev2_candle: dict,
+                          candle_window: list = None) -> Token:
         """
         Build a simulated Token object from candle data so the
         signal aggregator can analyze it the same way it does live data.
+        
+        candle_window: optional list of recent candles for true volatility calc.
         """
         price = candle["close"]
         prev_price = prev_candle["close"]
@@ -604,6 +608,25 @@ class BacktestEngine:
 
         change_1h = (price - prev_price) / prev_price * 100 if prev_price > 0 else 0
         change_24h = (price - prev2_price) / prev2_price * 100 if prev2_price > 0 else 0
+
+        # Calculate TRUE volatility from candle window (not just 1-2 candle changes)
+        # This is critical: IRYS showed 3% volatility with old method but really has 15%+
+        if candle_window and len(candle_window) >= 5:
+            # Use standard deviation of candle-to-candle returns over recent history
+            returns = []
+            for j in range(1, len(candle_window)):
+                p1 = candle_window[j - 1]["close"]
+                p2 = candle_window[j]["close"]
+                if p1 > 0:
+                    returns.append(abs((p2 - p1) / p1 * 100))
+            if returns:
+                # Use mean absolute return as volatility proxy
+                # This gives a much better picture than single-candle change
+                avg_return = sum(returns) / len(returns)
+                max_return = max(returns)
+                # Scale: avg per-candle volatility × sqrt(6) ≈ daily volatility
+                true_vol = avg_return * 2.5  # Scale 4h volatility to approximate daily
+                change_24h = max(change_24h, true_vol, max_return)
 
         # Estimate 5m change from intra-candle movement
         change_5m = (price - candle["open"]) / candle["open"] * 100 if candle["open"] > 0 else 0
