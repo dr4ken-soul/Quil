@@ -654,9 +654,16 @@ class BacktestEngine:
 
         triggers = []
         all_pumps = []  # Track all significant price moves
-        PUMP_THRESHOLD = 10.0      # 10% price surge = potential crime pump
-        VOLUME_SPIKE_MULT = 3.0    # 3x average volume = suspicious
-        LOOKFORWARD = min(5, len(candles) // 4)  # How many candles to check after trigger
+
+        # TUNED THRESHOLDS (based on backtest: SIREN 52%, RIVER 50% accuracy was too many false positives)
+        PUMP_THRESHOLD = 15.0      # 15% price surge = potential crime pump (was 10% — too sensitive)
+        VOLUME_SPIKE_MULT = 4.0    # 4x average volume = suspicious (was 3x — too many false positives)
+        COMBO_THRESHOLD = 8.0      # Volume spike + 8% price move (was 5% — normal trading noise)
+        TRUE_POS_THRESHOLD = 8.0   # Must pump another 8% after trigger to be "correct" (was 5%)
+        TRIGGER_COOLDOWN = 3       # Don't re-trigger within 3 candles of last trigger
+        LOOKFORWARD = min(8, len(candles) // 4)  # Check 8 candles ahead (was 5 — too short)
+
+        last_trigger_idx = -TRIGGER_COOLDOWN  # Allow first trigger immediately
 
         for i in range(2, len(candles) - LOOKFORWARD):
             candle = candles[i]
@@ -674,11 +681,17 @@ class BacktestEngine:
             # Check for crime pump indicators
             is_volume_spike = vol_ratio > VOLUME_SPIKE_MULT
             is_price_surge = price_change > PUMP_THRESHOLD
-            is_crime_pump_signal = is_volume_spike and price_change > 5  # Volume spike + price move
+            is_crime_pump_signal = is_volume_spike and price_change > COMBO_THRESHOLD
 
             triggered = is_price_surge or is_crime_pump_signal
 
+            # Cooldown: skip if we triggered recently (same pump event)
+            if triggered and (i - last_trigger_idx) < TRIGGER_COOLDOWN:
+                triggered = False
+
             if triggered:
+                last_trigger_idx = i
+
                 # Look forward to see what happened after
                 future_prices = [candles[i + j]["close"] for j in range(1, LOOKFORWARD + 1)]
                 max_future = max(future_prices) if future_prices else price
@@ -690,8 +703,8 @@ class BacktestEngine:
                 net_change = (end_future - price) / price * 100
 
                 # Was the detection correct?
-                # True positive = price continued up >5% after trigger
-                was_correct = pump_after > 5
+                # True positive = price continued up >8% after trigger (was 5%)
+                was_correct = pump_after > TRUE_POS_THRESHOLD
 
                 trigger_type = "Volume Spike + Surge" if is_crime_pump_signal else "Price Surge"
 
@@ -706,8 +719,8 @@ class BacktestEngine:
                     "volume_ratio": vol_ratio,
                 })
 
-            # Track all significant pumps (>15%) to find missed ones
-            if price_change > 15:
+            # Track all significant pumps (>20%) to find missed ones (was 15%)
+            if price_change > 20:
                 all_pumps.append(i)
 
         # Calculate results
