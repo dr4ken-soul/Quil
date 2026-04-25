@@ -739,13 +739,31 @@ class SignalAggregator:
                 else:
                     return Direction.SHORT, 0.25
 
+        # === TREND CONFIRMATION FILTER ===
+        # If 24h trend is strongly up, boost LONG and penalize SHORT
+        # If 24h trend is strongly down, boost SHORT and penalize LONG
+        # This prevents counter-trend entries (shorting BTC at +14%)
+        change_24h_dir = token.metrics.price_change_24h
+        if change_24h_dir > 8:  # Strong uptrend
+            bull_score *= 1.3
+            bear_score *= 0.6  # Penalize shorts in uptrend
+        elif change_24h_dir > 3:  # Moderate uptrend
+            bull_score *= 1.15
+            bear_score *= 0.8
+        elif change_24h_dir < -8:  # Strong downtrend
+            bear_score *= 1.3
+            bull_score *= 0.6  # Penalize longs in downtrend
+        elif change_24h_dir < -3:  # Moderate downtrend
+            bear_score *= 1.15
+            bull_score *= 0.8
+
         # Determine raw direction
         if bull_score > bear_score:
             new_direction = Direction.LONG
-            confidence = bull_score / total
+            confidence = bull_score / (bull_score + bear_score)
         elif bear_score > bull_score:
             new_direction = Direction.SHORT
-            confidence = bear_score / total
+            confidence = bear_score / (bull_score + bear_score)
         else:
             if token.metrics.price_change_1h >= 0:
                 new_direction = Direction.LONG
@@ -755,7 +773,7 @@ class SignalAggregator:
 
         # Direction stickiness — prevent flip-flopping
         symbol = token.symbol
-        diff = abs(bull_score - bear_score) / total if total > 0 else 0
+        diff = abs(bull_score - bear_score) / (bull_score + bear_score) if (bull_score + bear_score) > 0 else 0
 
         if symbol in self._direction_cache:
             cached_dir, cached_time = self._direction_cache[symbol]
@@ -906,11 +924,18 @@ class SignalAggregator:
 
         risk_reward = tp1_mult
 
-        # Leverage — based on confidence and volatility
-        if confidence >= 0.7 and volatility < 5:
-            leverage = 10
-        elif confidence >= 0.5 and volatility < 8:
-            leverage = 5
+        # Leverage — VOLATILITY-AWARE (prevents -100% liquidations)
+        # High volatility tokens (IRYS, RAVE) get lower leverage
+        if volatility >= 15:
+            leverage = 2  # Very volatile: 2x max
+        elif volatility >= 8:
+            leverage = 3  # Volatile: 3x max
+        elif confidence >= 0.7 and volatility < 5:
+            leverage = 7  # High confidence + low vol (was 10, capped for safety)
+        elif confidence >= 0.5 and volatility < 5:
+            leverage = 5  # Good confidence + low vol
+        elif confidence >= 0.5:
+            leverage = 3  # Good confidence but moderate vol
         elif confidence >= 0.4:
             leverage = 3
         else:

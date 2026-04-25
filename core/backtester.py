@@ -138,8 +138,8 @@ class BacktestEngine:
         detection_timeline = []
 
         # Max trade duration: close trades after N candles to allow multiple signals
-        # This simulates realistic trading (you don't hold forever)
-        max_trade_candles = max(len(candles) // 8, 6)  # ~12.5% of period or min 6 candles
+        # Reduced to ~3 days for 4h candles — don't hold losing positions forever
+        max_trade_candles = max(len(candles) // 10, 6)  # ~10% of period or min 6 candles
         signal_cooldown = 3  # Wait 3 candles between trades
         candles_since_last_trade = signal_cooldown  # Allow immediate first trade
 
