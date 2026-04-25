@@ -706,6 +706,13 @@ class BacktestEngine:
                 continue
 
             price_change = (price - prev_price) / prev_price * 100
+
+            # Also check candle HIGH for flash pump-and-dumps
+            # RIVER went $29→$85→$16 in one day — close was $16 but HIGH was $85
+            candle_high = candle.get("high", price)
+            wick_surge = (candle_high - prev_price) / prev_price * 100 if prev_price > 0 else 0
+            is_wick_pump = wick_surge > 50 and (candle_high - price) / candle_high * 100 > 20  # Big wick + rejection
+
             volume = candle.get("volume", 0)
             vol_ratio = volume / avg_volume if avg_volume > 0 else 0
 
@@ -734,7 +741,7 @@ class BacktestEngine:
                         is_rolling_pump = True
                         rolling_type = "Multi-Candle Pump (3)"
 
-            triggered = is_price_surge or is_crime_pump_signal or is_rolling_pump
+            triggered = is_price_surge or is_crime_pump_signal or is_rolling_pump or is_wick_pump
 
             # Cooldown: skip if we triggered recently (same pump event)
             if triggered and (i - last_trigger_idx) < TRIGGER_COOLDOWN:
@@ -757,7 +764,9 @@ class BacktestEngine:
                 # True positive = price continued up >8% after trigger (was 5%)
                 was_correct = pump_after > TRUE_POS_THRESHOLD
 
-                if is_rolling_pump:
+                if is_wick_pump:
+                    trigger_type = f"Flash Pump & Dump (wick +{wick_surge:.0f}%)"
+                elif is_rolling_pump:
                     trigger_type = rolling_type
                 elif is_crime_pump_signal:
                     trigger_type = "Volume Spike + Surge"
