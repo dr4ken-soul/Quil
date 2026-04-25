@@ -168,7 +168,7 @@ class BacktestEngine:
                     best = active_trade._best_price
                     # Calculate unrealized profit %
                     unrealized = (best - active_trade.entry_price) / active_trade.entry_price * 100
-                    if unrealized >= 2.0:
+                    if unrealized >= 1.5:
                         # Trail SL at 50% of the best gain (lock in half the profit)
                         trail_price = active_trade.entry_price * (1 + unrealized * 0.5 / 100)
                         if trail_price > active_trade.stop_loss:
@@ -179,7 +179,7 @@ class BacktestEngine:
                         active_trade._best_price = low
                     best = active_trade._best_price
                     unrealized = (active_trade.entry_price - best) / active_trade.entry_price * 100
-                    if unrealized >= 2.0:
+                    if unrealized >= 1.5:
                         trail_price = active_trade.entry_price * (1 - unrealized * 0.5 / 100)
                         if trail_price < active_trade.stop_loss:
                             active_trade.stop_loss = trail_price
@@ -303,7 +303,9 @@ class BacktestEngine:
                         multi_tf_data=bt_candle_data,
                     )
                     if signal and signal.confidence >= 0.50 and signal.risk.entry_price > 0:
-                        # Open a trade
+                        # Use signal's dynamically calculated leverage (volatility-aware)
+                        # This gives IRYS/RAVE 2-3x instead of the hardcoded 5x
+                        trade_leverage = signal.risk.leverage if signal.risk.leverage > 0 else leverage
                         position_size = min(balance * 0.05, balance)  # 5% of balance
                         active_trade = BacktestTrade(
                             entry_time=timestamp,
@@ -311,7 +313,7 @@ class BacktestEngine:
                             entry_price=signal.risk.entry_price,
                             stop_loss=signal.risk.stop_loss,
                             take_profit=signal.risk.take_profit_1,
-                            leverage=leverage,
+                            leverage=trade_leverage,
                             position_size=position_size,
                         )
                         active_trade._candle_count = 0
