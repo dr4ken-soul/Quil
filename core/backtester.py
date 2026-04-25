@@ -159,6 +159,31 @@ class BacktestEngine:
                 close = candle["close"]
                 active_trade._candle_count = getattr(active_trade, '_candle_count', 0) + 1
 
+                # === TRAILING STOP LOGIC ===
+                # Track best price and move SL to lock in profits
+                if active_trade.direction == "LONG":
+                    best = getattr(active_trade, '_best_price', active_trade.entry_price)
+                    if high > best:
+                        active_trade._best_price = high
+                    best = active_trade._best_price
+                    # Calculate unrealized profit %
+                    unrealized = (best - active_trade.entry_price) / active_trade.entry_price * 100
+                    if unrealized >= 2.0:
+                        # Trail SL at 50% of the best gain (lock in half the profit)
+                        trail_price = active_trade.entry_price * (1 + unrealized * 0.5 / 100)
+                        if trail_price > active_trade.stop_loss:
+                            active_trade.stop_loss = trail_price
+                else:  # SHORT
+                    best = getattr(active_trade, '_best_price', active_trade.entry_price)
+                    if low < best:
+                        active_trade._best_price = low
+                    best = active_trade._best_price
+                    unrealized = (active_trade.entry_price - best) / active_trade.entry_price * 100
+                    if unrealized >= 2.0:
+                        trail_price = active_trade.entry_price * (1 - unrealized * 0.5 / 100)
+                        if trail_price < active_trade.stop_loss:
+                            active_trade.stop_loss = trail_price
+
                 # Check SL hit
                 if active_trade.direction == "LONG" and low <= active_trade.stop_loss:
                     active_trade.exit_price = active_trade.stop_loss
