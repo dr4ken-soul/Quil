@@ -688,24 +688,39 @@ class SignalAggregator:
             is_oversold = any(w in sig_text for w in ["oversold", "rsi (1", "rsi (2"])
 
             if is_overbought:
-                bear_score += sig.weight * 0.40  # Strong bearish from RSI extreme
+                bear_score += sig.weight * 0.50  # Strong bearish from RSI extreme
             elif is_oversold:
-                bull_score += sig.weight * 0.40  # Strong bullish from RSI extreme
+                bull_score += sig.weight * 0.50  # Strong bullish from RSI extreme
 
+            # Classify signal as bullish or bearish
             is_bullish = any(w in sig_text for w in [
-                "bullish", "bottom", "bounce", "oversold", "support",
+                "bullish", "bottom", "bounce", "oversold",
                 "hammer", "morning star", "three white", "upward",
             ])
             is_bearish = any(w in sig_text for w in [
-                "bearish", "top", "overbought", "resistance", "pull back",
+                "bearish", "top", "overbought", "pull back",
                 "shooting star", "evening star", "three black", "downward",
                 "overextended",
             ])
 
+            # EMA/MACD/RSI/Bollinger = high-confidence trend signals (0.45 weight)
+            # Support/Resistance = noise when there are many (0.08 weight)
+            is_trend_signal = any(w in sig_text for w in [
+                "ema", "macd", "rsi", "bollinger", "pattern", "chart trend",
+            ])
+            is_sr_signal = any(w in sig_text for w in ["support", "resistance"])
+
+            if is_sr_signal:
+                score_mult = 0.08  # Low weight — too many, drowns out real signals
+            elif is_trend_signal:
+                score_mult = 0.45  # High weight — these are the real trend indicators
+            else:
+                score_mult = 0.25  # Default
+
             if is_bullish and not is_bearish:
-                bull_score += sig.weight * 0.25
+                bull_score += sig.weight * score_mult
             elif is_bearish and not is_bullish:
-                bear_score += sig.weight * 0.25
+                bear_score += sig.weight * score_mult
 
         # Ensure scores don't go negative
         bull_score = max(bull_score, 0)
@@ -862,23 +877,23 @@ class SignalAggregator:
         if crime_status in (CrimeStage.STAGE_THREE, CrimeStage.STAGE_FOUR):
             sl_pct *= 1.3  # More room during volatile manipulation phases
 
-        sl_pct = max(sl_pct, 1.5)   # Minimum 1.5% stop
+        sl_pct = max(sl_pct, 2.5)   # Minimum 2.5% stop (was 1.5% — too tight, causes whipsaws)
         sl_pct = min(sl_pct, 15.0)  # Maximum 15% stop
 
         # Dynamic R:R based on confidence
-        # Higher confidence = more aggressive TP = better R:R
+        # TUNED: Lower TP multipliers = more achievable targets = higher win rate
         if confidence >= 0.7:
-            tp1_mult = 3.0    # 3:1 R:R
-            tp2_mult = 5.0    # 5:1 R:R
+            tp1_mult = 2.5    # 2.5:1 R:R (was 3.0)
+            tp2_mult = 4.0    # 4:1 R:R (was 5.0)
         elif confidence >= 0.5:
-            tp1_mult = 2.5    # 2.5:1 R:R
-            tp2_mult = 4.0    # 4:1 R:R
+            tp1_mult = 2.0    # 2.0:1 R:R (was 2.5)
+            tp2_mult = 3.0    # 3:1 R:R (was 4.0)
         elif confidence >= 0.4:
-            tp1_mult = 2.2    # 2.2:1 R:R
-            tp2_mult = 3.5    # 3.5:1 R:R
+            tp1_mult = 1.8    # 1.8:1 R:R (was 2.2)
+            tp2_mult = 2.8    # 2.8:1 R:R (was 3.5)
         else:
-            tp1_mult = 2.0    # 2:1 R:R (conservative for low confidence)
-            tp2_mult = 3.0    # 3:1 R:R
+            tp1_mult = 1.5    # 1.5:1 R:R (was 2.0)
+            tp2_mult = 2.5    # 2.5:1 R:R (was 3.0)
 
         if direction == Direction.LONG:
             stop_loss = entry * (1 - sl_pct / 100)

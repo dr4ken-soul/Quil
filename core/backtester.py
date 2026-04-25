@@ -277,7 +277,7 @@ class BacktestEngine:
                         token,
                         multi_tf_data=bt_candle_data,
                     )
-                    if signal and signal.confidence >= 0.4 and signal.risk.entry_price > 0:
+                    if signal and signal.confidence >= 0.50 and signal.risk.entry_price > 0:
                         # Open a trade
                         position_size = min(balance * 0.05, balance)  # 5% of balance
                         active_trade = BacktestTrade(
