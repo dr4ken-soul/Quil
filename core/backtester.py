@@ -265,7 +265,18 @@ class BacktestEngine:
 
             if self._aggregator:
                 try:
-                    signal = await self._aggregator.generate_trade_signal(token)
+                    # Build a rolling window of recent candles for chart analysis
+                    # This gives the signal aggregator RSI, EMA, MACD, etc.
+                    lookback = min(i + 1, 50)  # Use up to 50 recent candles
+                    recent_candles = candles[max(0, i - lookback + 1):i + 1]
+
+                    # Format as multi-timeframe data (use as "15m" equivalent)
+                    bt_candle_data = {"15m": recent_candles}
+
+                    signal = await self._aggregator.generate_trade_signal(
+                        token,
+                        multi_tf_data=bt_candle_data,
+                    )
                     if signal and signal.confidence >= 0.4 and signal.risk.entry_price > 0:
                         # Open a trade
                         position_size = min(balance * 0.05, balance)  # 5% of balance
