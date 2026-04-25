@@ -473,6 +473,38 @@ class PositionMonitor:
                 if current_price is None or current_price <= 0:
                     continue
 
+                # === TRAILING STOP (matches backtester logic) ===
+                # Track best price and move SL to lock in profits
+                if position.stop_loss > 0 and position.entry_price > 0:
+                    if position.direction.upper() == "LONG":
+                        best = getattr(position, '_best_price', position.entry_price)
+                        if current_price > best:
+                            position._best_price = current_price
+                        best = position._best_price
+                        unrealized = (best - position.entry_price) / position.entry_price * 100
+                        if unrealized >= 2.0:
+                            trail_price = position.entry_price * (1 + unrealized * 0.5 / 100)
+                            if trail_price > position.stop_loss:
+                                old_sl = position.stop_loss
+                                position.stop_loss = trail_price
+                                log.info("trailing_stop_moved", symbol=position.symbol,
+                                        direction="LONG", old_sl=old_sl,
+                                        new_sl=trail_price, unrealized=f"{unrealized:.1f}%")
+                    elif position.direction.upper() == "SHORT":
+                        best = getattr(position, '_best_price', position.entry_price)
+                        if current_price < best:
+                            position._best_price = current_price
+                        best = position._best_price
+                        unrealized = (position.entry_price - best) / position.entry_price * 100
+                        if unrealized >= 2.0:
+                            trail_price = position.entry_price * (1 - unrealized * 0.5 / 100)
+                            if trail_price < position.stop_loss:
+                                old_sl = position.stop_loss
+                                position.stop_loss = trail_price
+                                log.info("trailing_stop_moved", symbol=position.symbol,
+                                        direction="SHORT", old_sl=old_sl,
+                                        new_sl=trail_price, unrealized=f"{unrealized:.1f}%")
+
                 # Check all alert conditions
                 triggered_alerts = position.check_alerts(current_price)
 
