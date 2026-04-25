@@ -680,12 +680,32 @@ class BacktestEngine:
             volume = candle.get("volume", 0)
             vol_ratio = volume / avg_volume if avg_volume > 0 else 0
 
-            # Check for crime pump indicators
+            # === SINGLE-CANDLE DETECTION (sharp spikes) ===
             is_volume_spike = vol_ratio > VOLUME_SPIKE_MULT
             is_price_surge = price_change > PUMP_THRESHOLD
             is_crime_pump_signal = is_volume_spike and price_change > COMBO_THRESHOLD
 
-            triggered = is_price_surge or is_crime_pump_signal
+            # === ROLLING WINDOW DETECTION (multi-candle pumps like RIVER) ===
+            # Check cumulative move over last 3 and 5 candles
+            # This catches pumps that build over several candles (each 8-12% but total 50%+)
+            is_rolling_pump = False
+            rolling_type = ""
+            if i >= 5:
+                price_5_ago = candles[i - 5]["close"]
+                if price_5_ago > 0:
+                    cumulative_5 = (price - price_5_ago) / price_5_ago * 100
+                    if cumulative_5 > 40:  # 40%+ over 5 candles (~20h for 4h candles)
+                        is_rolling_pump = True
+                        rolling_type = "Multi-Candle Pump (5)"
+            if not is_rolling_pump and i >= 3:
+                price_3_ago = candles[i - 3]["close"]
+                if price_3_ago > 0:
+                    cumulative_3 = (price - price_3_ago) / price_3_ago * 100
+                    if cumulative_3 > 30:  # 30%+ over 3 candles (~12h)
+                        is_rolling_pump = True
+                        rolling_type = "Multi-Candle Pump (3)"
+
+            triggered = is_price_surge or is_crime_pump_signal or is_rolling_pump
 
             # Cooldown: skip if we triggered recently (same pump event)
             if triggered and (i - last_trigger_idx) < TRIGGER_COOLDOWN:
@@ -708,7 +728,12 @@ class BacktestEngine:
                 # True positive = price continued up >8% after trigger (was 5%)
                 was_correct = pump_after > TRUE_POS_THRESHOLD
 
-                trigger_type = "Volume Spike + Surge" if is_crime_pump_signal else "Price Surge"
+                if is_rolling_pump:
+                    trigger_type = rolling_type
+                elif is_crime_pump_signal:
+                    trigger_type = "Volume Spike + Surge"
+                else:
+                    trigger_type = "Price Surge"
 
                 triggers.append({
                     "type": trigger_type,
