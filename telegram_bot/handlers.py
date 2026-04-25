@@ -299,6 +299,18 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             mode = "Paper Trading" if _execution_engine.paper_trading else "Live Trading"
             message += f"\n\nExecution Mode: {mode}"
 
+        # Add data source info
+        data_sources = []
+        if multi_tf_data:
+            tf_info = ", ".join(f"{tf}({len(c)})" for tf, c in multi_tf_data.items())
+            source = "Bybit" if any(c and c[0].get("volume", 0) > 0 for c in multi_tf_data.values()) else "CoinGecko"
+            data_sources.append(f"Candles: {source} [{tf_info}]")
+        else:
+            data_sources.append("Candles: None (DexScreener price only)")
+
+        if data_sources:
+            message += f"\nData: {' | '.join(data_sources)}"
+
         keyboard = get_trade_analysis_keyboard(query)
         await processing_msg.edit_text(message, reply_markup=keyboard)
 
@@ -1345,6 +1357,64 @@ async def positions_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     keyboard = get_positions_keyboard()
     await update.message.reply_text("\n".join(lines), reply_markup=keyboard)
+
+
+async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /pending command. View pending paper limit orders."""
+    if not _execution_engine:
+        await update.message.reply_text("Execution engine not available.")
+        return
+
+    # Check for pending trades awaiting confirmation
+    pending_confirms = _execution_engine._pending_trades
+    # Check for active limit orders being monitored
+    active_limits = getattr(_execution_engine, '_active_limit_orders', {})
+
+    if not pending_confirms and not active_limits:
+        await update.message.reply_text(
+            "No pending orders.\n\n"
+            "Pending orders appear when:\n"
+            "- You place a paper limit order (waiting for price to hit)\n"
+            "- You start a trade and haven't confirmed yet"
+        )
+        return
+
+    lines = ["📋 Pending Orders\n"]
+
+    # Show pending trade confirmations
+    if pending_confirms:
+        lines.append(f"⏳ Awaiting Confirmation ({len(pending_confirms)}):")
+        for cid, data in pending_confirms.items():
+            signal = data.get("signal")
+            created = data.get("created")
+            if signal:
+                direction = signal.direction.value.upper()
+                token = signal.token_symbol
+                entry = signal.risk.entry_price
+                entry_str = f"${entry:.6f}" if entry < 1 else f"${entry:,.2f}"
+                age_s = (datetime.now(timezone.utc) - created).total_seconds() if created else 0
+                lines.append(f"  {direction} ${token} at {entry_str}")
+                lines.append(f"  ID: {cid} | Age: {age_s:.0f}s")
+        lines.append("")
+
+    # Show active limit orders
+    if active_limits:
+        lines.append(f"📋 Limit Orders Monitoring ({len(active_limits)}):")
+        for order_id, order_data in active_limits.items():
+            symbol = order_data.get("symbol", "?")
+            limit_price = order_data.get("limit_price", 0)
+            direction = order_data.get("direction", "?")
+            created = order_data.get("created")
+            price_str = f"${limit_price:.6f}" if limit_price < 1 else f"${limit_price:,.2f}"
+            if created:
+                age_min = (datetime.now(timezone.utc) - created).total_seconds() / 60
+                lines.append(f"  {direction} ${symbol} limit at {price_str}")
+                lines.append(f"  Waiting: {age_min:.1f} min")
+            else:
+                lines.append(f"  {direction} ${symbol} limit at {price_str}")
+        lines.append("")
+
+    await update.message.reply_text("\n".join(lines))
 
 
 async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
