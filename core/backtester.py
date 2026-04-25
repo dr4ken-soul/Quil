@@ -137,6 +137,12 @@ class BacktestEngine:
         active_trade: Optional[BacktestTrade] = None
         detection_timeline = []
 
+        # Max trade duration: close trades after N candles to allow multiple signals
+        # This simulates realistic trading (you don't hold forever)
+        max_trade_candles = max(len(candles) // 8, 6)  # ~12.5% of period or min 6 candles
+        signal_cooldown = 3  # Wait 3 candles between trades
+        candles_since_last_trade = signal_cooldown  # Allow immediate first trade
+
         for i in range(2, len(candles)):
             candle = candles[i]
             prev_candle = candles[i - 1]
@@ -151,6 +157,7 @@ class BacktestEngine:
                 high = candle["high"]
                 low = candle["low"]
                 close = candle["close"]
+                active_trade._candle_count = getattr(active_trade, '_candle_count', 0) + 1
 
                 # Check SL hit
                 if active_trade.direction == "LONG" and low <= active_trade.stop_loss:
@@ -158,24 +165,26 @@ class BacktestEngine:
                     active_trade.exit_time = timestamp
                     active_trade.exit_reason = "SL"
                     pnl_pct = (active_trade.exit_price - active_trade.entry_price) / active_trade.entry_price * 100 * leverage
-                    pnl_pct = max(pnl_pct, -100.0)  # Cap at liquidation
+                    pnl_pct = max(pnl_pct, -100.0)
                     active_trade.pnl_pct = pnl_pct
                     active_trade.pnl_usd = active_trade.position_size * pnl_pct / 100
                     balance += active_trade.pnl_usd
                     trades.append(active_trade)
                     active_trade = None
+                    candles_since_last_trade = 0
 
                 elif active_trade.direction == "SHORT" and high >= active_trade.stop_loss:
                     active_trade.exit_price = active_trade.stop_loss
                     active_trade.exit_time = timestamp
                     active_trade.exit_reason = "SL"
                     pnl_pct = (active_trade.entry_price - active_trade.exit_price) / active_trade.entry_price * 100 * leverage
-                    pnl_pct = max(pnl_pct, -100.0)  # Cap at liquidation
+                    pnl_pct = max(pnl_pct, -100.0)
                     active_trade.pnl_pct = pnl_pct
                     active_trade.pnl_usd = active_trade.position_size * pnl_pct / 100
                     balance += active_trade.pnl_usd
                     trades.append(active_trade)
                     active_trade = None
+                    candles_since_last_trade = 0
 
                 # Check TP hit
                 elif active_trade.direction == "LONG" and high >= active_trade.take_profit:
@@ -188,6 +197,7 @@ class BacktestEngine:
                     balance += active_trade.pnl_usd
                     trades.append(active_trade)
                     active_trade = None
+                    candles_since_last_trade = 0
 
                 elif active_trade.direction == "SHORT" and low <= active_trade.take_profit:
                     active_trade.exit_price = active_trade.take_profit
@@ -199,6 +209,7 @@ class BacktestEngine:
                     balance += active_trade.pnl_usd
                     trades.append(active_trade)
                     active_trade = None
+                    candles_since_last_trade = 0
 
                 # Check liquidation
                 elif active_trade.direction == "LONG":
@@ -212,6 +223,7 @@ class BacktestEngine:
                         balance -= active_trade.position_size
                         trades.append(active_trade)
                         active_trade = None
+                        candles_since_last_trade = 0
 
                 elif active_trade.direction == "SHORT":
                     liq_price = active_trade.entry_price * (1 + 1 / leverage)
@@ -224,11 +236,31 @@ class BacktestEngine:
                         balance -= active_trade.position_size
                         trades.append(active_trade)
                         active_trade = None
+                        candles_since_last_trade = 0
 
-                continue  # Don't open new trade while one is active
+                # Max duration — force close to allow new trades
+                if active_trade and getattr(active_trade, '_candle_count', 0) >= max_trade_candles:
+                    active_trade.exit_price = close
+                    active_trade.exit_time = timestamp
+                    active_trade.exit_reason = "max_duration"
+                    if active_trade.direction == "LONG":
+                        pnl_pct = (close - active_trade.entry_price) / active_trade.entry_price * 100 * leverage
+                    else:
+                        pnl_pct = (active_trade.entry_price - close) / active_trade.entry_price * 100 * leverage
+                    pnl_pct = max(pnl_pct, -100.0)
+                    active_trade.pnl_pct = pnl_pct
+                    active_trade.pnl_usd = active_trade.position_size * pnl_pct / 100
+                    balance += active_trade.pnl_usd
+                    trades.append(active_trade)
+                    active_trade = None
+                    candles_since_last_trade = 0
+
+                if active_trade:
+                    continue  # Don't open new trade while one is active
 
             # No active trade — try to generate a signal
-            if balance <= 0:
+            candles_since_last_trade += 1
+            if balance <= 0 or candles_since_last_trade < signal_cooldown:
                 continue
 
             if self._aggregator:
@@ -246,6 +278,7 @@ class BacktestEngine:
                             leverage=leverage,
                             position_size=position_size,
                         )
+                        active_trade._candle_count = 0
 
                         detection_timeline.append({
                             "time": timestamp.isoformat(),
@@ -461,16 +494,17 @@ class BacktestEngine:
 
         bybit_symbol = f"{ticker}USDT"
 
-        # Choose interval based on days
+        # Always use 4h candles for backtests (good balance of resolution + range)
+        # 4h candles trigger SL/TP more realistically than daily
         if days <= 2:
-            interval = "60"     # 1h candles for short backtests
+            interval = "60"     # 1h candles for very short backtests
             limit = min(days * 24, 200)
-        elif days <= 14:
+        elif days <= 7:
             interval = "240"    # 4h candles
             limit = min(days * 6, 200)
         else:
-            interval = "D"      # Daily candles
-            limit = min(days, 200)
+            interval = "240"    # 4h candles (NOT daily — daily is too coarse)
+            limit = 200         # Max 200 candles = ~33 days of 4h data
 
         try:
             url = "https://api.bybit.com/v5/market/kline"
