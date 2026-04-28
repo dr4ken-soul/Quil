@@ -482,7 +482,7 @@ class PositionMonitor:
                             position._best_price = current_price
                         best = position._best_price
                         unrealized = (best - position.entry_price) / position.entry_price * 100
-                        if unrealized >= 1.5:
+                        if unrealized >= 1.0:  # Activate trailing at 1.0% (was 1.5%)
                             trail_price = position.entry_price * (1 + unrealized * 0.5 / 100)
                             if trail_price > position.stop_loss:
                                 old_sl = position.stop_loss
@@ -496,7 +496,7 @@ class PositionMonitor:
                             position._best_price = current_price
                         best = position._best_price
                         unrealized = (position.entry_price - best) / position.entry_price * 100
-                        if unrealized >= 1.5:
+                        if unrealized >= 1.0:  # Activate trailing at 1.0% (was 1.5%)
                             trail_price = position.entry_price * (1 - unrealized * 0.5 / 100)
                             if trail_price < position.stop_loss:
                                 old_sl = position.stop_loss

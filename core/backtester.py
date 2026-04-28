@@ -169,7 +169,7 @@ class BacktestEngine:
                     best = active_trade._best_price
                     # Calculate unrealized profit %
                     unrealized = (best - active_trade.entry_price) / active_trade.entry_price * 100
-                    if unrealized >= 1.5:
+                    if unrealized >= 1.0:  # Activate trailing at 1.0% (was 1.5%)
                         # Trail SL at 50% of the best gain (lock in half the profit)
                         trail_price = active_trade.entry_price * (1 + unrealized * 0.5 / 100)
                         if trail_price > active_trade.stop_loss:
@@ -180,7 +180,7 @@ class BacktestEngine:
                         active_trade._best_price = low
                     best = active_trade._best_price
                     unrealized = (active_trade.entry_price - best) / active_trade.entry_price * 100
-                    if unrealized >= 1.5:
+                    if unrealized >= 1.0:  # Activate trailing at 1.0% (was 1.5%)
                         trail_price = active_trade.entry_price * (1 - unrealized * 0.5 / 100)
                         if trail_price < active_trade.stop_loss:
                             active_trade.stop_loss = trail_price
@@ -265,21 +265,35 @@ class BacktestEngine:
                         candles_since_last_trade = 0
 
                 # Max duration — force close to allow new trades
-                if active_trade and getattr(active_trade, '_candle_count', 0) >= max_trade_candles:
-                    active_trade.exit_price = close
-                    active_trade.exit_time = timestamp
-                    active_trade.exit_reason = "max_duration"
+                # EARLY EXIT: if losing after 60% of max duration, cut it now
+                candle_count = getattr(active_trade, '_candle_count', 0)
+                early_exit_candles = int(max_trade_candles * 0.6)  # 60% of max duration
+                
+                if active_trade and candle_count >= early_exit_candles:
+                    # Calculate current PnL
                     if active_trade.direction == "LONG":
-                        pnl_pct = (close - active_trade.entry_price) / active_trade.entry_price * 100 * leverage
+                        current_pnl = (close - active_trade.entry_price) / active_trade.entry_price * 100
                     else:
-                        pnl_pct = (active_trade.entry_price - close) / active_trade.entry_price * 100 * leverage
-                    pnl_pct = max(pnl_pct, -100.0)
-                    active_trade.pnl_pct = pnl_pct
-                    active_trade.pnl_usd = active_trade.position_size * pnl_pct / 100
-                    balance += active_trade.pnl_usd
-                    trades.append(active_trade)
-                    active_trade = None
-                    candles_since_last_trade = 0
+                        current_pnl = (active_trade.entry_price - close) / active_trade.entry_price * 100
+                    
+                    # Force exit if: at max duration OR losing after 60% of max duration
+                    should_exit = candle_count >= max_trade_candles or (candle_count >= early_exit_candles and current_pnl < 0)
+                    
+                    if should_exit:
+                        active_trade.exit_price = close
+                        active_trade.exit_time = timestamp
+                        active_trade.exit_reason = "max_duration" if candle_count >= max_trade_candles else "early_exit"
+                        if active_trade.direction == "LONG":
+                            pnl_pct = (close - active_trade.entry_price) / active_trade.entry_price * 100 * leverage
+                        else:
+                            pnl_pct = (active_trade.entry_price - close) / active_trade.entry_price * 100 * leverage
+                        pnl_pct = max(pnl_pct, -100.0)
+                        active_trade.pnl_pct = pnl_pct
+                        active_trade.pnl_usd = active_trade.position_size * pnl_pct / 100
+                        balance += active_trade.pnl_usd
+                        trades.append(active_trade)
+                        active_trade = None
+                        candles_since_last_trade = 0
 
                 if active_trade:
                     continue  # Don't open new trade while one is active

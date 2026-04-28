@@ -895,23 +895,24 @@ class SignalAggregator:
         if crime_status in (CrimeStage.STAGE_THREE, CrimeStage.STAGE_FOUR):
             sl_pct *= 1.3  # More room during volatile manipulation phases
 
-        sl_pct = max(sl_pct, 2.5)   # Minimum 2.5% stop (was 1.5% — too tight, causes whipsaws)
-        sl_pct = min(sl_pct, 15.0)  # Maximum 15% stop
+        sl_pct = max(sl_pct, 2.0)   # Minimum 2.0% stop (was 2.5% — too wide for BTC/ETH)
+        sl_pct = min(sl_pct, 12.0)  # Maximum 12% stop (was 15% — too much risk)
 
         # Dynamic R:R based on confidence
-        # TUNED: Lower TP multipliers = more achievable targets = higher win rate
+        # TUNED R9: Much lower TP targets = TP gets hit BEFORE max_duration timeout
+        # This is the #1 fix for win rate: trades were expiring before reaching TP
         if confidence >= 0.7:
-            tp1_mult = 2.5    # 2.5:1 R:R (was 3.0)
-            tp2_mult = 4.0    # 4:1 R:R (was 5.0)
-        elif confidence >= 0.5:
-            tp1_mult = 2.0    # 2.0:1 R:R (was 2.5)
+            tp1_mult = 1.8    # 1.8:1 R:R (was 2.5 — too far, never hit for BTC/ETH)
             tp2_mult = 3.0    # 3:1 R:R (was 4.0)
-        elif confidence >= 0.4:
-            tp1_mult = 1.8    # 1.8:1 R:R (was 2.2)
-            tp2_mult = 2.8    # 2.8:1 R:R (was 3.5)
-        else:
-            tp1_mult = 1.5    # 1.5:1 R:R (was 2.0)
+        elif confidence >= 0.5:
+            tp1_mult = 1.5    # 1.5:1 R:R (was 2.0 — TP at 5% when SL is 2.5% was unreachable)
             tp2_mult = 2.5    # 2.5:1 R:R (was 3.0)
+        elif confidence >= 0.4:
+            tp1_mult = 1.3    # 1.3:1 R:R (was 1.8)
+            tp2_mult = 2.0    # 2.0:1 R:R (was 2.8)
+        else:
+            tp1_mult = 1.2    # 1.2:1 R:R (was 1.5)
+            tp2_mult = 1.8    # 1.8:1 R:R (was 2.5)
 
         if direction == Direction.LONG:
             stop_loss = entry * (1 - sl_pct / 100)
