@@ -307,6 +307,14 @@ class BacktestEngine:
                         # Use signal's dynamically calculated leverage (volatility-aware)
                         # This gives IRYS/RAVE 2-3x instead of the hardcoded 5x
                         trade_leverage = signal.risk.leverage if signal.risk.leverage > 0 else leverage
+                        # Cap leverage using true volatility from candle window
+                        # This prevents IRYS/RAVE from getting 5x when real volatility is 15%+
+                        true_vol = getattr(token, '_true_volatility', 2.0)
+                        if true_vol >= 15:
+                            trade_leverage = min(trade_leverage, 2)
+                        elif true_vol >= 8:
+                            trade_leverage = min(trade_leverage, 3)
+
                         position_size = min(balance * 0.05, balance)  # 5% of balance
                         active_trade = BacktestTrade(
                             entry_time=timestamp,
@@ -318,6 +326,7 @@ class BacktestEngine:
                             position_size=position_size,
                         )
                         active_trade._candle_count = 0
+                        active_trade._best_price = signal.risk.entry_price  # Init for trailing stop
 
                         detection_timeline.append({
                             "time": timestamp.isoformat(),
@@ -611,8 +620,10 @@ class BacktestEngine:
 
         # Calculate TRUE volatility from candle window (not just 1-2 candle changes)
         # This is critical: IRYS showed 3% volatility with old method but really has 15%+
+        # NOTE: Do NOT overwrite change_24h — that breaks the trend filter!
+        # Store volatility separately and use it to cap leverage after signal generation.
+        true_volatility = 2.0  # default minimum
         if candle_window and len(candle_window) >= 5:
-            # Use standard deviation of candle-to-candle returns over recent history
             returns = []
             for j in range(1, len(candle_window)):
                 p1 = candle_window[j - 1]["close"]
@@ -620,13 +631,9 @@ class BacktestEngine:
                 if p1 > 0:
                     returns.append(abs((p2 - p1) / p1 * 100))
             if returns:
-                # Use mean absolute return as volatility proxy
-                # This gives a much better picture than single-candle change
                 avg_return = sum(returns) / len(returns)
                 max_return = max(returns)
-                # Scale: avg per-candle volatility × sqrt(6) ≈ daily volatility
-                true_vol = avg_return * 2.5  # Scale 4h volatility to approximate daily
-                change_24h = max(change_24h, true_vol, max_return)
+                true_volatility = max(avg_return * 2.5, max_return)
 
         # Estimate 5m change from intra-candle movement
         change_5m = (price - candle["open"]) / candle["open"] * 100 if candle["open"] > 0 else 0
@@ -647,6 +654,8 @@ class BacktestEngine:
         token.derivatives = DerivativesMetrics()
         token.onchain = OnChainMetrics()
         token.social = SocialMetrics()
+        # Attach true volatility for leverage capping (not in metrics to avoid corrupting trend filter)
+        token._true_volatility = true_volatility
 
         return token
 
