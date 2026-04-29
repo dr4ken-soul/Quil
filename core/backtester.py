@@ -303,7 +303,7 @@ class BacktestEngine:
                         token,
                         multi_tf_data=bt_candle_data,
                     )
-                    if signal and signal.confidence >= 0.55 and signal.risk.entry_price > 0:
+                    if signal and signal.confidence >= 0.50 and signal.risk.entry_price > 0:
                         # Use signal's dynamically calculated leverage (volatility-aware)
                         # This gives IRYS/RAVE 2-3x instead of the hardcoded 5x
                         trade_leverage = signal.risk.leverage if signal.risk.leverage > 0 else leverage
