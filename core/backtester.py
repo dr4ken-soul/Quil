@@ -304,6 +304,52 @@ class BacktestEngine:
                         multi_tf_data=bt_candle_data,
                     )
                     if signal and signal.confidence >= 0.50 and signal.risk.entry_price > 0:
+                        # === ENTRY QUALITY FILTER ===
+                        # Calculate RSI and EMA directly from candle data
+                        # Reject signals that enter at bad prices (chasing moves)
+                        accept_signal = True
+                        
+                        if len(recent_candles) >= 14:
+                            # Calculate RSI (14-period)
+                            gains, losses = [], []
+                            for j in range(1, min(15, len(recent_candles))):
+                                delta = recent_candles[-j]["close"] - recent_candles[-j-1]["close"]
+                                if delta > 0:
+                                    gains.append(delta)
+                                    losses.append(0)
+                                else:
+                                    gains.append(0)
+                                    losses.append(abs(delta))
+                            avg_gain = sum(gains) / len(gains) if gains else 0
+                            avg_loss = sum(losses) / len(losses) if losses else 0.001
+                            rs = avg_gain / avg_loss if avg_loss > 0 else 100
+                            rsi = 100 - (100 / (1 + rs))
+                            
+                            # Calculate 20-EMA
+                            ema_period = min(20, len(recent_candles))
+                            closes = [c["close"] for c in recent_candles[-ema_period:]]
+                            multiplier = 2 / (ema_period + 1)
+                            ema = closes[0]
+                            for c_val in closes[1:]:
+                                ema = (c_val - ema) * multiplier + ema
+                            
+                            current_price = recent_candles[-1]["close"]
+                            price_vs_ema = (current_price - ema) / ema * 100  # % above/below EMA
+                            
+                            # FILTER: Reject overbought Longs and oversold Shorts
+                            if signal.direction.value == "LONG":
+                                if rsi > 65:
+                                    accept_signal = False  # Don't chase — already overbought
+                                elif price_vs_ema < -3:
+                                    accept_signal = False  # Price too far below EMA — fighting trend
+                            elif signal.direction.value == "SHORT":
+                                if rsi < 35:
+                                    accept_signal = False  # Don't short into oversold
+                                elif price_vs_ema > 3:
+                                    accept_signal = False  # Price too far above EMA — fighting trend
+                        
+                        if not accept_signal:
+                            continue  # Skip this signal — bad entry quality
                         # Use signal's dynamically calculated leverage (volatility-aware)
                         # This gives IRYS/RAVE 2-3x instead of the hardcoded 5x
                         trade_leverage = signal.risk.leverage if signal.risk.leverage > 0 else leverage
