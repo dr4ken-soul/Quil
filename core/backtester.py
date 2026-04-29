@@ -188,18 +188,21 @@ class BacktestEngine:
                             active_trade.stop_loss = trail_price
                 # === HARD MAX LOSS CAP: -15% per trade ===
                 # Prevents catastrophic single-trade losses (-30%, -46%, -100%)
-                # that erase multiple winning trades
+                # Uses HIGH/LOW to catch intracandle breaches, exits at exact -15% price
+                max_loss_price_pct = 15.0 / active_trade.leverage  # Price move for -15% PnL
                 if active_trade.direction == "LONG":
-                    current_pnl_pct = (close - active_trade.entry_price) / active_trade.entry_price * 100 * active_trade.leverage
+                    max_loss_price = active_trade.entry_price * (1 - max_loss_price_pct / 100)
+                    hit_max_loss = low <= max_loss_price
                 else:
-                    current_pnl_pct = (active_trade.entry_price - close) / active_trade.entry_price * 100 * active_trade.leverage
+                    max_loss_price = active_trade.entry_price * (1 + max_loss_price_pct / 100)
+                    hit_max_loss = high >= max_loss_price
                 
-                if current_pnl_pct <= -15.0:
-                    active_trade.exit_price = close
+                if hit_max_loss:
+                    active_trade.exit_price = max_loss_price  # Exit at exact -15% level
                     active_trade.exit_time = timestamp
                     active_trade.exit_reason = "max_loss"
-                    active_trade.pnl_pct = max(current_pnl_pct, -100.0)
-                    active_trade.pnl_usd = active_trade.position_size * active_trade.pnl_pct / 100
+                    active_trade.pnl_pct = -15.0  # Always exactly -15%
+                    active_trade.pnl_usd = active_trade.position_size * -15.0 / 100
                     balance += active_trade.pnl_usd
                     trades.append(active_trade)
                     last_exit_direction = active_trade.direction
