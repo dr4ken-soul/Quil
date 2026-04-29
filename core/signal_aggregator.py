@@ -942,11 +942,9 @@ class SignalAggregator:
             else:
                 leverage = 3
         else:
-            # Low volatility (BTC, ETH) — safe for higher leverage
+            # Low volatility (BTC, ETH) — cap at 5x to limit individual losses
             if confidence >= 0.7:
-                leverage = 10  # High confidence + stable asset = 10x is standard
-            elif confidence >= 0.6:
-                leverage = 7   # Good confidence
+                leverage = 5   # High confidence + stable asset
             elif confidence >= 0.5:
                 leverage = 5   # Moderate confidence
             elif confidence >= 0.4:
