@@ -138,10 +138,12 @@ class BacktestEngine:
         detection_timeline = []
 
         # Max trade duration: close trades after N candles to allow multiple signals
-        # Reduced to ~3 days for 4h candles — don't hold losing positions forever
-        max_trade_candles = max(len(candles) // 10, 6)  # ~10% of period or min 6 candles
-        signal_cooldown = 3  # Wait 3 candles between trades
+        # Increased to ~5 days for 4h candles — give trends time to develop
+        max_trade_candles = max(len(candles) // 6, 10)  # ~16% of period or min 10 candles (~40h)
+        signal_cooldown = 6  # Wait 6 candles (24h) between trades — no rapid re-entry
         candles_since_last_trade = signal_cooldown  # Allow immediate first trade
+        last_exit_direction = None  # Track direction of last closed trade
+        last_exit_was_loss = False  # Track if last trade lost money
 
         for i in range(2, len(candles)):
             candle = candles[i]
@@ -196,6 +198,8 @@ class BacktestEngine:
                     active_trade.pnl_usd = active_trade.position_size * pnl_pct / 100
                     balance += active_trade.pnl_usd
                     trades.append(active_trade)
+                    last_exit_direction = active_trade.direction
+                    last_exit_was_loss = pnl_pct < 0
                     active_trade = None
                     candles_since_last_trade = 0
 
@@ -209,6 +213,8 @@ class BacktestEngine:
                     active_trade.pnl_usd = active_trade.position_size * pnl_pct / 100
                     balance += active_trade.pnl_usd
                     trades.append(active_trade)
+                    last_exit_direction = active_trade.direction
+                    last_exit_was_loss = pnl_pct < 0
                     active_trade = None
                     candles_since_last_trade = 0
 
@@ -222,6 +228,8 @@ class BacktestEngine:
                     active_trade.pnl_usd = active_trade.position_size * pnl_pct / 100
                     balance += active_trade.pnl_usd
                     trades.append(active_trade)
+                    last_exit_direction = active_trade.direction
+                    last_exit_was_loss = False
                     active_trade = None
                     candles_since_last_trade = 0
 
@@ -234,6 +242,8 @@ class BacktestEngine:
                     active_trade.pnl_usd = active_trade.position_size * pnl_pct / 100
                     balance += active_trade.pnl_usd
                     trades.append(active_trade)
+                    last_exit_direction = active_trade.direction
+                    last_exit_was_loss = False
                     active_trade = None
                     candles_since_last_trade = 0
 
@@ -248,6 +258,8 @@ class BacktestEngine:
                         active_trade.pnl_usd = -active_trade.position_size
                         balance -= active_trade.position_size
                         trades.append(active_trade)
+                        last_exit_direction = active_trade.direction
+                        last_exit_was_loss = True
                         active_trade = None
                         candles_since_last_trade = 0
 
@@ -261,6 +273,8 @@ class BacktestEngine:
                         active_trade.pnl_usd = -active_trade.position_size
                         balance -= active_trade.position_size
                         trades.append(active_trade)
+                        last_exit_direction = active_trade.direction
+                        last_exit_was_loss = True
                         active_trade = None
                         candles_since_last_trade = 0
 
@@ -278,6 +292,8 @@ class BacktestEngine:
                     active_trade.pnl_usd = active_trade.position_size * pnl_pct / 100
                     balance += active_trade.pnl_usd
                     trades.append(active_trade)
+                    last_exit_direction = active_trade.direction
+                    last_exit_was_loss = pnl_pct < 0
                     active_trade = None
                     candles_since_last_trade = 0
 
@@ -347,6 +363,11 @@ class BacktestEngine:
                                     accept_signal = False  # Don't short into oversold
                                 elif price_vs_ema > 3:
                                     accept_signal = False  # Price too far above EMA — fighting trend
+                        
+                        # ANTI-CHURN: Don't re-enter same direction after a loss
+                        # Prevents: Long→lose→Long→lose→Long→lose pattern on BTC
+                        if last_exit_was_loss and signal.direction.value == last_exit_direction:
+                            accept_signal = False  # Wait for opposite direction or winning trade first
                         
                         if not accept_signal:
                             continue  # Skip this signal — bad entry quality
