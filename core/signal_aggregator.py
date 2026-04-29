@@ -925,22 +925,34 @@ class SignalAggregator:
 
         risk_reward = tp1_mult
 
-        # Leverage — VOLATILITY-AWARE (prevents -100% liquidations)
-        # High volatility tokens (IRYS, RAVE) get lower leverage
+        # Leverage — VOLATILITY-AWARE + CONFIDENCE-SCALED
+        # Determines leverage dynamically based on the bot's analysis
+        # Low vol + high confidence (BTC/ETH) → higher leverage is safe
+        # High vol (IRYS/RAVE/memecoins) → low leverage to avoid liquidation
         if volatility >= 15:
-            leverage = 2  # Very volatile: 2x max
-        elif volatility >= 8:
-            leverage = 3  # Volatile: 3x max
-        elif confidence >= 0.7 and volatility < 5:
-            leverage = 7  # High confidence + low vol (was 10, capped for safety)
-        elif confidence >= 0.5 and volatility < 5:
-            leverage = 5  # Good confidence + low vol
-        elif confidence >= 0.5:
-            leverage = 3  # Good confidence but moderate vol
-        elif confidence >= 0.4:
-            leverage = 3
+            leverage = 2   # Extreme volatility: 2x max (memecoins, IRYS)
+        elif volatility >= 10:
+            leverage = 3   # High volatility: 3x max (RAVE, ROBO)
+        elif volatility >= 5:
+            # Moderate volatility (SOL, DOGE)
+            if confidence >= 0.7:
+                leverage = 7
+            elif confidence >= 0.5:
+                leverage = 5
+            else:
+                leverage = 3
         else:
-            leverage = 2
+            # Low volatility (BTC, ETH) — safe for higher leverage
+            if confidence >= 0.7:
+                leverage = 10  # High confidence + stable asset = 10x is standard
+            elif confidence >= 0.6:
+                leverage = 7   # Good confidence
+            elif confidence >= 0.5:
+                leverage = 5   # Moderate confidence
+            elif confidence >= 0.4:
+                leverage = 3
+            else:
+                leverage = 2
 
         # Position size (% of portfolio)
         position_pct = min(5.0, confidence * 8)
