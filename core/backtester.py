@@ -190,7 +190,7 @@ class BacktestEngine:
                     active_trade.exit_price = active_trade.stop_loss
                     active_trade.exit_time = timestamp
                     active_trade.exit_reason = "SL"
-                    pnl_pct = (active_trade.exit_price - active_trade.entry_price) / active_trade.entry_price * 100 * leverage
+                    pnl_pct = (active_trade.exit_price - active_trade.entry_price) / active_trade.entry_price * 100 * active_trade.leverage
                     pnl_pct = max(pnl_pct, -100.0)
                     active_trade.pnl_pct = pnl_pct
                     active_trade.pnl_usd = active_trade.position_size * pnl_pct / 100
@@ -203,7 +203,7 @@ class BacktestEngine:
                     active_trade.exit_price = active_trade.stop_loss
                     active_trade.exit_time = timestamp
                     active_trade.exit_reason = "SL"
-                    pnl_pct = (active_trade.entry_price - active_trade.exit_price) / active_trade.entry_price * 100 * leverage
+                    pnl_pct = (active_trade.entry_price - active_trade.exit_price) / active_trade.entry_price * 100 * active_trade.leverage
                     pnl_pct = max(pnl_pct, -100.0)
                     active_trade.pnl_pct = pnl_pct
                     active_trade.pnl_usd = active_trade.position_size * pnl_pct / 100
@@ -217,7 +217,7 @@ class BacktestEngine:
                     active_trade.exit_price = active_trade.take_profit
                     active_trade.exit_time = timestamp
                     active_trade.exit_reason = "TP"
-                    pnl_pct = (active_trade.exit_price - active_trade.entry_price) / active_trade.entry_price * 100 * leverage
+                    pnl_pct = (active_trade.exit_price - active_trade.entry_price) / active_trade.entry_price * 100 * active_trade.leverage
                     active_trade.pnl_pct = pnl_pct
                     active_trade.pnl_usd = active_trade.position_size * pnl_pct / 100
                     balance += active_trade.pnl_usd
@@ -229,7 +229,7 @@ class BacktestEngine:
                     active_trade.exit_price = active_trade.take_profit
                     active_trade.exit_time = timestamp
                     active_trade.exit_reason = "TP"
-                    pnl_pct = (active_trade.entry_price - active_trade.exit_price) / active_trade.entry_price * 100 * leverage
+                    pnl_pct = (active_trade.entry_price - active_trade.exit_price) / active_trade.entry_price * 100 * active_trade.leverage
                     active_trade.pnl_pct = pnl_pct
                     active_trade.pnl_usd = active_trade.position_size * pnl_pct / 100
                     balance += active_trade.pnl_usd
@@ -239,7 +239,7 @@ class BacktestEngine:
 
                 # Check liquidation
                 elif active_trade.direction == "LONG":
-                    liq_price = active_trade.entry_price * (1 - 1 / leverage)
+                    liq_price = active_trade.entry_price * (1 - 1 / active_trade.leverage)
                     if low <= liq_price:
                         active_trade.exit_price = liq_price
                         active_trade.exit_time = timestamp
@@ -252,7 +252,7 @@ class BacktestEngine:
                         candles_since_last_trade = 0
 
                 elif active_trade.direction == "SHORT":
-                    liq_price = active_trade.entry_price * (1 + 1 / leverage)
+                    liq_price = active_trade.entry_price * (1 + 1 / active_trade.leverage)
                     if high >= liq_price:
                         active_trade.exit_price = liq_price
                         active_trade.exit_time = timestamp
@@ -270,9 +270,9 @@ class BacktestEngine:
                     active_trade.exit_time = timestamp
                     active_trade.exit_reason = "max_duration"
                     if active_trade.direction == "LONG":
-                        pnl_pct = (close - active_trade.entry_price) / active_trade.entry_price * 100 * leverage
+                        pnl_pct = (close - active_trade.entry_price) / active_trade.entry_price * 100 * active_trade.leverage
                     else:
-                        pnl_pct = (active_trade.entry_price - close) / active_trade.entry_price * 100 * leverage
+                        pnl_pct = (active_trade.entry_price - close) / active_trade.entry_price * 100 * active_trade.leverage
                     pnl_pct = max(pnl_pct, -100.0)
                     active_trade.pnl_pct = pnl_pct
                     active_trade.pnl_usd = active_trade.position_size * pnl_pct / 100
@@ -353,9 +353,9 @@ class BacktestEngine:
             active_trade.exit_time = datetime.fromtimestamp(candles[-1]["timestamp"] / 1000, tz=timezone.utc)
             active_trade.exit_reason = "timeout"
             if active_trade.direction == "LONG":
-                pnl_pct = (close_price - active_trade.entry_price) / active_trade.entry_price * 100 * leverage
+                pnl_pct = (close_price - active_trade.entry_price) / active_trade.entry_price * 100 * active_trade.leverage
             else:
-                pnl_pct = (active_trade.entry_price - close_price) / active_trade.entry_price * 100 * leverage
+                pnl_pct = (active_trade.entry_price - close_price) / active_trade.entry_price * 100 * active_trade.leverage
             pnl_pct = max(pnl_pct, -100.0)  # Cap at liquidation
             active_trade.pnl_pct = pnl_pct
             active_trade.pnl_usd = active_trade.position_size * pnl_pct / 100
