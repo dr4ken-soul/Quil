@@ -392,20 +392,27 @@ class BacktestEngine:
                                 ema_slope = 0  # Not enough data
                             
                             # Override direction ONLY when both price AND slope agree
-                            # Scale slope threshold by volatility:
-                            # BTC (vol ~2%): 0.1%  |  IRYS (vol ~15%): 0.75%  |  RAVE (vol ~20%): 1.0%
+                            # For LOW-VOL tokens (BTC/ETH): skip slope — EMA moves too slowly
+                            # For HIGH-VOL tokens (IRYS/RAVE): require slope to prevent whipsaw
                             true_vol = getattr(token, '_true_volatility', 2.0)
-                            slope_threshold = max(0.1, true_vol * 0.05)
                             
-                            if price_vs_ema > 1.0 and ema_slope > slope_threshold:
-                                # Price above rising EMA = confirmed uptrend → Long
-                                override_direction = "LONG"
-                            elif price_vs_ema < -1.0 and ema_slope < -slope_threshold:
-                                # Price below falling EMA = confirmed downtrend → Short
-                                override_direction = "SHORT"
+                            if true_vol < 5:
+                                # Low volatility (BTC, ETH): use price vs EMA only
+                                if price_vs_ema > 1.0:
+                                    override_direction = "LONG"
+                                elif price_vs_ema < -1.0:
+                                    override_direction = "SHORT"
+                                else:
+                                    override_direction = signal.direction.value
                             else:
-                                # EMA and price disagree (choppy market) → use signal's direction
-                                override_direction = signal.direction.value
+                                # High volatility: require slope confirmation
+                                slope_threshold = max(0.2, true_vol * 0.03)
+                                if price_vs_ema > 1.0 and ema_slope > slope_threshold:
+                                    override_direction = "LONG"
+                                elif price_vs_ema < -1.0 and ema_slope < -slope_threshold:
+                                    override_direction = "SHORT"
+                                else:
+                                    override_direction = signal.direction.value
                             
                             # RSI confirmation: reject if overbought/oversold
                             if override_direction == "LONG" and rsi > 70:
