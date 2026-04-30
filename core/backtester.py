@@ -362,6 +362,19 @@ class BacktestEngine:
                                     accept_signal = False  # Don't short into oversold
                                 elif price_vs_ema > 3:
                                     accept_signal = False  # Price too far above EMA — fighting trend
+                            
+                            # TREND DIRECTION FILTER: Don't trade against strong trends
+                            # If price is up >5% over 20 candles, don't Short
+                            # If price is down >5% over 20 candles, don't Long
+                            trend_window = min(20, len(recent_candles))
+                            trend_start = recent_candles[-trend_window]["close"]
+                            trend_end = recent_candles[-1]["close"]
+                            trend_pct = (trend_end - trend_start) / trend_start * 100
+                            
+                            if signal.direction.value == "LONG" and trend_pct < -5:
+                                accept_signal = False  # Don't Long in a downtrend
+                            elif signal.direction.value == "SHORT" and trend_pct > 5:
+                                accept_signal = False  # Don't Short in an uptrend
                         
                         # ANTI-CHURN: Don't re-enter same direction after a loss
                         # Prevents: Long→lose→Long→lose→Long→lose pattern on BTC
