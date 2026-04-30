@@ -392,10 +392,15 @@ class BacktestEngine:
                                 ema_slope = 0  # Not enough data
                             
                             # Override direction ONLY when both price AND slope agree
-                            if price_vs_ema > 1.0 and ema_slope > 0.3:
+                            # Scale slope threshold by volatility:
+                            # BTC (vol ~2%): 0.1%  |  IRYS (vol ~15%): 0.75%  |  RAVE (vol ~20%): 1.0%
+                            true_vol = getattr(token, '_true_volatility', 2.0)
+                            slope_threshold = max(0.1, true_vol * 0.05)
+                            
+                            if price_vs_ema > 1.0 and ema_slope > slope_threshold:
                                 # Price above rising EMA = confirmed uptrend → Long
                                 override_direction = "LONG"
-                            elif price_vs_ema < -1.0 and ema_slope < -0.3:
+                            elif price_vs_ema < -1.0 and ema_slope < -slope_threshold:
                                 # Price below falling EMA = confirmed downtrend → Short
                                 override_direction = "SHORT"
                             else:
