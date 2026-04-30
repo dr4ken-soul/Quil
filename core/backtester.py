@@ -438,13 +438,13 @@ class BacktestEngine:
                         # Use signal's dynamically calculated leverage (volatility-aware)
                         # This gives IRYS/RAVE 2-3x instead of the hardcoded 5x
                         trade_leverage = signal.risk.leverage if signal.risk.leverage > 0 else leverage
-                        # Cap leverage using true volatility from candle window
-                        # This prevents IRYS/RAVE from getting 5x when real volatility is 15%+
+                        # Cap leverage: lower leverage = wider effective SL = fewer false triggers
+                        # At 3x, -30% max_loss requires 10% adverse move (vs 6% at 5x)
                         true_vol = getattr(token, '_true_volatility', 2.0)
                         if true_vol >= 15:
-                            trade_leverage = min(trade_leverage, 2)
-                        elif true_vol >= 8:
-                            trade_leverage = min(trade_leverage, 3)
+                            trade_leverage = min(trade_leverage, 2)  # IRYS/RAVE: extreme vol
+                        else:
+                            trade_leverage = min(trade_leverage, 3)  # Everything else: max 3x
 
                         position_size = min(balance * 0.05, balance)  # 5% of balance
                         
