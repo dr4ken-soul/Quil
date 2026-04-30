@@ -392,12 +392,12 @@ class BacktestEngine:
                                 ema_slope = 0  # Not enough data
                             
                             # Override direction ONLY when both price AND slope agree
-                            # For LOW-VOL tokens (BTC/ETH): skip slope — EMA moves too slowly
-                            # For HIGH-VOL tokens (IRYS/RAVE): require slope to prevent whipsaw
-                            true_vol = getattr(token, '_true_volatility', 2.0)
+                            # LARGE-CAP tokens (BTC/ETH/SOL/DOGE): skip slope — EMA moves too slowly
+                            # SMALL-CAP tokens (IRYS/RAVE/ROBO): require slope to prevent whipsaw
+                            is_large_cap = any(s in symbol.upper() for s in ["BTC", "ETH", "SOL", "DOGE"])
                             
-                            if true_vol < 5:
-                                # Low volatility (BTC, ETH): use price vs EMA only
+                            if is_large_cap:
+                                # Large-cap: use price vs EMA only (gave BTC 75% WR)
                                 if price_vs_ema > 1.0:
                                     override_direction = "LONG"
                                 elif price_vs_ema < -1.0:
@@ -405,7 +405,8 @@ class BacktestEngine:
                                 else:
                                     override_direction = signal.direction.value
                             else:
-                                # High volatility: require slope confirmation
+                                # Small-cap: require slope confirmation
+                                true_vol = getattr(token, '_true_volatility', 2.0)
                                 slope_threshold = max(0.2, true_vol * 0.03)
                                 if price_vs_ema > 1.0 and ema_slope > slope_threshold:
                                     override_direction = "LONG"
