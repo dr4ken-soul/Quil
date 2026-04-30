@@ -351,37 +351,40 @@ class BacktestEngine:
                             current_price = recent_candles[-1]["close"]
                             price_vs_ema = (current_price - ema) / ema * 100  # % above/below EMA
                             
-                            # FILTER: Reject overbought Longs and oversold Shorts
-                            if signal.direction.value == "LONG":
-                                if rsi > 65:
-                                    accept_signal = False  # Don't chase — already overbought
-                                elif price_vs_ema < -3:
-                                    accept_signal = False  # Price too far below EMA — fighting trend
-                            elif signal.direction.value == "SHORT":
-                                if rsi < 35:
-                                    accept_signal = False  # Don't short into oversold
-                                elif price_vs_ema > 3:
-                                    accept_signal = False  # Price too far above EMA — fighting trend
+                            # === TREND-FOLLOWING DIRECTION OVERRIDE ===
+                            # The signal aggregator decides WHEN to enter (confidence/timing)
+                            # But the TREND decides WHICH direction (Long or Short)
+                            # This is why ROBO gets 80% WR — direction matches the trend
                             
-                            # TREND DIRECTION FILTER: Don't trade against the trend
-                            # Uses FULL lookback window (up to 50 candles = ~8 days)
-                            # Threshold lowered to 3% to catch gradual uptrends like BTC
-                            trend_start = recent_candles[0]["close"]
-                            trend_end = recent_candles[-1]["close"]
-                            trend_pct = (trend_end - trend_start) / trend_start * 100
+                            # Override direction based on EMA trend
+                            if price_vs_ema > 1.0:
+                                # Price above EMA = uptrend → force Long
+                                override_direction = "LONG"
+                            elif price_vs_ema < -1.0:
+                                # Price below EMA = downtrend → force Short
+                                override_direction = "SHORT"
+                            else:
+                                # Price near EMA = no clear trend → use signal's direction
+                                override_direction = signal.direction.value
                             
-                            if signal.direction.value == "LONG" and trend_pct < -3:
-                                accept_signal = False  # Don't Long in a downtrend
-                            elif signal.direction.value == "SHORT" and trend_pct > 3:
-                                accept_signal = False  # Don't Short in an uptrend
+                            # RSI confirmation: reject if overbought/oversold
+                            if override_direction == "LONG" and rsi > 70:
+                                accept_signal = False  # Overbought — wait for pullback
+                            elif override_direction == "SHORT" and rsi < 30:
+                                accept_signal = False  # Oversold — wait for bounce
                         
                         # ANTI-CHURN: Don't re-enter same direction after a loss
-                        # Prevents: Long→lose→Long→lose→Long→lose pattern on BTC
-                        if last_exit_was_loss and signal.direction.value == last_exit_direction:
-                            accept_signal = False  # Wait for opposite direction or winning trade first
+                        if last_exit_was_loss and (override_direction if 'override_direction' in dir() else signal.direction.value) == last_exit_direction:
+                            accept_signal = False
                         
                         if not accept_signal:
                             continue  # Skip this signal — bad entry quality
+                        
+                        # Apply direction override
+                        if len(recent_candles) >= 14:
+                            trade_direction = override_direction
+                        else:
+                            trade_direction = signal.direction.value
                         # Use signal's dynamically calculated leverage (volatility-aware)
                         # This gives IRYS/RAVE 2-3x instead of the hardcoded 5x
                         trade_leverage = signal.risk.leverage if signal.risk.leverage > 0 else leverage
@@ -394,12 +397,29 @@ class BacktestEngine:
                             trade_leverage = min(trade_leverage, 3)
 
                         position_size = min(balance * 0.05, balance)  # 5% of balance
+                        
+                        # Recalculate SL/TP if direction was overridden
+                        entry_price = signal.risk.entry_price
+                        if trade_direction != signal.direction.value:
+                            # Direction overridden by trend — recalculate SL/TP
+                            sl_dist = abs(signal.risk.entry_price - signal.risk.stop_loss)
+                            tp_dist = abs(signal.risk.take_profit_1 - signal.risk.entry_price)
+                            if trade_direction == "LONG":
+                                trade_sl = entry_price - sl_dist
+                                trade_tp = entry_price + tp_dist
+                            else:
+                                trade_sl = entry_price + sl_dist
+                                trade_tp = entry_price - tp_dist
+                        else:
+                            trade_sl = signal.risk.stop_loss
+                            trade_tp = signal.risk.take_profit_1
+                        
                         active_trade = BacktestTrade(
                             entry_time=timestamp,
-                            direction=signal.direction.value,
-                            entry_price=signal.risk.entry_price,
-                            stop_loss=signal.risk.stop_loss,
-                            take_profit=signal.risk.take_profit_1,
+                            direction=trade_direction,
+                            entry_price=entry_price,
+                            stop_loss=trade_sl,
+                            take_profit=trade_tp,
                             leverage=trade_leverage,
                             position_size=position_size,
                         )
