@@ -453,10 +453,11 @@ class BacktestEngine:
                         sl_dist = abs(signal.risk.entry_price - signal.risk.stop_loss)
                         tp_dist = abs(signal.risk.take_profit_1 - signal.risk.entry_price)
                         
-                        # Widen SL by 1.5x — signal aggregator SL is too tight for 4h candles
-                        # At 3x, original SL triggers at -9% on 3% dip (normal noise)
-                        # With 1.5x: needs 4.5% dip = -13.5% (less likely to be noise)
-                        sl_dist *= 1.5
+                        # Widen SL by 1.5x for LARGE-CAP only
+                        # ETH: 50% → 77.8% WR with wider SL (fewer false triggers)
+                        # IRYS: 81% → 64.7% with wider SL (hurt it — keep original)
+                        if is_large_cap:
+                            sl_dist *= 1.5
                         
                         if trade_direction == "LONG":
                             trade_sl = entry_price - sl_dist
