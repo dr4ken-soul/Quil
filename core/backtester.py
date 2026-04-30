@@ -187,10 +187,10 @@ class BacktestEngine:
                         if trail_price < active_trade.stop_loss:
                             active_trade.stop_loss = trail_price
 
-                # === MAX LOSS CAP: -20% per trade ===
-                # Now works because EMA override gives 75-85% WR
-                # Only triggers on the few bad trades, not every trade
-                max_loss_price_move = 20.0 / active_trade.leverage  # Price move for -20%
+                # === MAX LOSS CAP: -30% per trade ===
+                # Catches catastrophic losses (-75%, -100%) but doesn't trigger on normal volatility
+                # At 5x (BTC): 6% price move. At 2x (IRYS): 15% move.
+                max_loss_price_move = 30.0 / active_trade.leverage  # Price move for -30%
                 if active_trade.direction == "LONG":
                     max_loss_price = active_trade.entry_price * (1 - max_loss_price_move / 100)
                     hit_max_loss = low <= max_loss_price
@@ -202,8 +202,8 @@ class BacktestEngine:
                     active_trade.exit_price = max_loss_price
                     active_trade.exit_time = timestamp
                     active_trade.exit_reason = "max_loss"
-                    active_trade.pnl_pct = -20.0
-                    active_trade.pnl_usd = active_trade.position_size * -20.0 / 100
+                    active_trade.pnl_pct = -30.0
+                    active_trade.pnl_usd = active_trade.position_size * -30.0 / 100
                     balance += active_trade.pnl_usd
                     trades.append(active_trade)
                     last_exit_direction = active_trade.direction
