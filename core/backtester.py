@@ -377,19 +377,29 @@ class BacktestEngine:
                             price_vs_ema = (current_price - ema) / ema * 100  # % above/below EMA
                             
                             # === TREND-FOLLOWING DIRECTION OVERRIDE ===
-                            # The signal aggregator decides WHEN to enter (confidence/timing)
-                            # But the TREND decides WHICH direction (Long or Short)
-                            # This is why ROBO gets 80% WR — direction matches the trend
+                            # Uses BOTH price vs EMA AND EMA slope for confirmation
+                            # Prevents whipsaw in choppy markets (ETH/DOGE)
                             
-                            # Override direction based on EMA trend
-                            if price_vs_ema > 1.0:
-                                # Price above EMA = uptrend → force Long
+                            # Calculate EMA slope: is the EMA itself rising or falling?
+                            # Compare current EMA to EMA from 5 candles ago
+                            if len(recent_candles) >= ema_period + 5:
+                                old_closes = [c["close"] for c in recent_candles[-(ema_period + 5):-5]]
+                                old_ema = old_closes[0]
+                                for c_val in old_closes[1:]:
+                                    old_ema = (c_val - old_ema) * multiplier + old_ema
+                                ema_slope = (ema - old_ema) / old_ema * 100  # % change in EMA
+                            else:
+                                ema_slope = 0  # Not enough data
+                            
+                            # Override direction ONLY when both price AND slope agree
+                            if price_vs_ema > 1.0 and ema_slope > 0.3:
+                                # Price above rising EMA = confirmed uptrend → Long
                                 override_direction = "LONG"
-                            elif price_vs_ema < -1.0:
-                                # Price below EMA = downtrend → force Short
+                            elif price_vs_ema < -1.0 and ema_slope < -0.3:
+                                # Price below falling EMA = confirmed downtrend → Short
                                 override_direction = "SHORT"
                             else:
-                                # Price near EMA = no clear trend → use signal's direction
+                                # EMA and price disagree (choppy market) → use signal's direction
                                 override_direction = signal.direction.value
                             
                             # RSI confirmation: reject if overbought/oversold
@@ -397,10 +407,6 @@ class BacktestEngine:
                                 accept_signal = False  # Overbought — wait for pullback
                             elif override_direction == "SHORT" and rsi < 30:
                                 accept_signal = False  # Oversold — wait for bounce
-                        
-                        # ANTI-CHURN: Don't re-enter same direction after a loss
-                        if last_exit_was_loss and (override_direction if 'override_direction' in dir() else signal.direction.value) == last_exit_direction:
-                            accept_signal = False
                         
                         if not accept_signal:
                             continue  # Skip this signal — bad entry quality
