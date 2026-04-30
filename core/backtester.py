@@ -185,7 +185,7 @@ class BacktestEngine:
                     if unrealized >= 1.0:  # Activate trailing at 1.0% (was 1.5%)
                         trail_price = active_trade.entry_price * (1 - unrealized * 0.5 / 100)
                         if trail_price < active_trade.stop_loss:
-
+                            active_trade.stop_loss = trail_price
                 # Check SL hit
                 if active_trade.direction == "LONG" and low <= active_trade.stop_loss:
                     active_trade.exit_price = active_trade.stop_loss
