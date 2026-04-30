@@ -377,43 +377,16 @@ class BacktestEngine:
                             price_vs_ema = (current_price - ema) / ema * 100  # % above/below EMA
                             
                             # === TREND-FOLLOWING DIRECTION OVERRIDE ===
-                            # Uses BOTH price vs EMA AND EMA slope for confirmation
-                            # Prevents whipsaw in choppy markets (ETH/DOGE)
-                            
-                            # Calculate EMA slope: is the EMA itself rising or falling?
-                            # Compare current EMA to EMA from 5 candles ago
-                            if len(recent_candles) >= ema_period + 5:
-                                old_closes = [c["close"] for c in recent_candles[-(ema_period + 5):-5]]
-                                old_ema = old_closes[0]
-                                for c_val in old_closes[1:]:
-                                    old_ema = (c_val - old_ema) * multiplier + old_ema
-                                ema_slope = (ema - old_ema) / old_ema * 100  # % change in EMA
-                            else:
-                                ema_slope = 0  # Not enough data
-                            
-                            # Override direction ONLY when both price AND slope agree
-                            # LARGE-CAP tokens (BTC/ETH/SOL/DOGE): skip slope — EMA moves too slowly
-                            # SMALL-CAP tokens (IRYS/RAVE/ROBO): require slope to prevent whipsaw
+                            # Simple price vs EMA for ALL tokens
+                            # This gave BTC 75%, IRYS 81%, RAVE 83% in R22
                             is_large_cap = any(s in symbol.upper() for s in ["BTC", "ETH", "SOL", "DOGE"])
                             
-                            if is_large_cap:
-                                # Large-cap: use price vs EMA only (gave BTC 75% WR)
-                                if price_vs_ema > 1.0:
-                                    override_direction = "LONG"
-                                elif price_vs_ema < -1.0:
-                                    override_direction = "SHORT"
-                                else:
-                                    override_direction = signal.direction.value
+                            if price_vs_ema > 1.0:
+                                override_direction = "LONG"
+                            elif price_vs_ema < -1.0:
+                                override_direction = "SHORT"
                             else:
-                                # Small-cap: require slope confirmation
-                                true_vol = getattr(token, '_true_volatility', 2.0)
-                                slope_threshold = max(0.2, true_vol * 0.03)
-                                if price_vs_ema > 1.0 and ema_slope > slope_threshold:
-                                    override_direction = "LONG"
-                                elif price_vs_ema < -1.0 and ema_slope < -slope_threshold:
-                                    override_direction = "SHORT"
-                                else:
-                                    override_direction = signal.direction.value
+                                override_direction = signal.direction.value
                             
                             # RSI confirmation: reject if overbought/oversold
                             if override_direction == "LONG" and rsi > 70:
