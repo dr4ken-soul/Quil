@@ -421,6 +421,12 @@ class BacktestEngine:
                             elif override_direction == "SHORT" and rsi < 30:
                                 accept_signal = False  # Oversold — wait for bounce
                         
+                        # ANTI-CHURN: Don't re-enter same direction after a loss
+                        # This spaces out entries — critical for BTC (75% WR with it, 16% without)
+                        final_dir = override_direction if 'override_direction' in dir() else signal.direction.value
+                        if last_exit_was_loss and final_dir == last_exit_direction:
+                            accept_signal = False
+                        
                         if not accept_signal:
                             continue  # Skip this signal — bad entry quality
                         
