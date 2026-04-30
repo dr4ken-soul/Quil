@@ -450,19 +450,20 @@ class BacktestEngine:
                         
                         # Recalculate SL/TP if direction was overridden
                         entry_price = signal.risk.entry_price
-                        if trade_direction != signal.direction.value:
-                            # Direction overridden by trend — recalculate SL/TP
-                            sl_dist = abs(signal.risk.entry_price - signal.risk.stop_loss)
-                            tp_dist = abs(signal.risk.take_profit_1 - signal.risk.entry_price)
-                            if trade_direction == "LONG":
-                                trade_sl = entry_price - sl_dist
-                                trade_tp = entry_price + tp_dist
-                            else:
-                                trade_sl = entry_price + sl_dist
-                                trade_tp = entry_price - tp_dist
+                        sl_dist = abs(signal.risk.entry_price - signal.risk.stop_loss)
+                        tp_dist = abs(signal.risk.take_profit_1 - signal.risk.entry_price)
+                        
+                        # Widen SL by 1.5x — signal aggregator SL is too tight for 4h candles
+                        # At 3x, original SL triggers at -9% on 3% dip (normal noise)
+                        # With 1.5x: needs 4.5% dip = -13.5% (less likely to be noise)
+                        sl_dist *= 1.5
+                        
+                        if trade_direction == "LONG":
+                            trade_sl = entry_price - sl_dist
+                            trade_tp = entry_price + tp_dist
                         else:
-                            trade_sl = signal.risk.stop_loss
-                            trade_tp = signal.risk.take_profit_1
+                            trade_sl = entry_price + sl_dist
+                            trade_tp = entry_price - tp_dist
                         
                         active_trade = BacktestTrade(
                             entry_time=timestamp,
