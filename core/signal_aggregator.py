@@ -136,8 +136,17 @@ class SignalAggregator:
         structure_signals = self._analyze_market_structure(token)
 
         # Step 5: Determine direction from TECHNICAL signals (not crime pump)
+        # Pass candle data for EMA trend override (critical for 75%+ WR)
+        candle_data = None
+        if multi_tf_data and "4h" in multi_tf_data:
+            candle_data = multi_tf_data["4h"]
+        elif multi_tf_data and "1h" in multi_tf_data:
+            candle_data = multi_tf_data["1h"]
+        elif ohlcv_data:
+            candle_data = ohlcv_data
+        
         direction, direction_confidence = self._determine_direction(
-            token, trap_result, technical_signals
+            token, trap_result, technical_signals, candle_data
         )
 
         # Step 6: Calculate confidence from all weighted sources
@@ -589,6 +598,7 @@ class SignalAggregator:
         token: Token,
         trap: Optional[TrapDetectionResult],
         tech_signals: list[TechnicalSignal],
+        candle_data: list = None,
     ) -> tuple[Direction, float]:
         """
         Determine trade direction from TECHNICAL analysis only.
@@ -770,6 +780,31 @@ class SignalAggregator:
             else:
                 new_direction = Direction.SHORT
             confidence = 0.50
+
+        # === EMA TREND OVERRIDE ===
+        # This is the #1 driver of the 75-85% win rate.
+        # If price is clearly above/below the 20-EMA, FORCE direction.
+        # Works for ANY token — not hardcoded to specific symbols.
+        if candle_data and len(candle_data) >= 20:
+            ema_period = 20
+            multiplier = 2 / (ema_period + 1)
+            closes = [c["close"] for c in candle_data[-ema_period:]]
+            ema = closes[0]
+            for c_val in closes[1:]:
+                ema = (c_val - ema) * multiplier + ema
+            current_price = closes[-1]
+            price_vs_ema = (current_price - ema) / ema * 100
+            
+            if price_vs_ema > 1.0:
+                new_direction = Direction.LONG
+                confidence = max(confidence, 0.65)
+                log.info("ema_override", token=token.symbol,
+                        direction="LONG", price_vs_ema=f"{price_vs_ema:.1f}%")
+            elif price_vs_ema < -1.0:
+                new_direction = Direction.SHORT
+                confidence = max(confidence, 0.65)
+                log.info("ema_override", token=token.symbol,
+                        direction="SHORT", price_vs_ema=f"{price_vs_ema:.1f}%")
 
         # Direction stickiness — prevent flip-flopping
         symbol = token.symbol

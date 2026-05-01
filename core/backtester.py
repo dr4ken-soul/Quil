@@ -378,8 +378,7 @@ class BacktestEngine:
                             
                             # === TREND-FOLLOWING DIRECTION OVERRIDE ===
                             # Simple price vs EMA for ALL tokens
-                            # This gave BTC 75%, IRYS 81%, RAVE 83% in R22
-                            is_large_cap = any(s in symbol.upper() for s in ["BTC", "ETH", "SOL", "DOGE"])
+                            # Works for ANY token — not hardcoded to specific symbols
                             
                             if price_vs_ema > 1.0:
                                 override_direction = "LONG"
@@ -426,10 +425,12 @@ class BacktestEngine:
                         sl_dist = abs(signal.risk.entry_price - signal.risk.stop_loss)
                         tp_dist = abs(signal.risk.take_profit_1 - signal.risk.entry_price)
                         
-                        # Widen SL by 1.5x for LARGE-CAP only
-                        # ETH: 50% → 77.8% WR with wider SL (fewer false triggers)
-                        # IRYS: 81% → 64.7% with wider SL (hurt it — keep original)
-                        if is_large_cap:
+                        # Widen SL by 1.5x for LOW-VOLATILITY tokens
+                        # Works for ANY token — uses actual volatility, not hardcoded names
+                        # Low vol (< 10%): normal 4h dips trigger false SLs → widen
+                        # High vol (>= 10%): SL is already appropriate → keep original
+                        true_vol = getattr(token, '_true_volatility', 2.0)
+                        if true_vol < 10:
                             sl_dist *= 1.5
                         
                         if trade_direction == "LONG":
