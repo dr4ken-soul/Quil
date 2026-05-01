@@ -676,7 +676,7 @@ class BacktestEngine:
             limit = min(days * 6, 200)
         elif days <= 60:
             interval = "240"    # 4h candles for medium periods
-            limit = 200         # ~33 days of 4h data
+            limit = min(days * 6, 200)  # 14d=84, 30d=180, 33d=200 max
         else:
             # For long periods (90d, 180d, 365d) — use DAILY candles
             # 4h candles max out at ~33 days. Daily candles can cover years.
