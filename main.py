@@ -10,7 +10,7 @@ import signal
 import sys
 from datetime import datetime, timedelta, timezone
 
-from config.settings import SCAN_INTERVAL_SECONDS, ALERT_COOLDOWN_MINUTES, PAPER_TRADING
+from config.settings import SCAN_INTERVAL_SECONDS, ALERT_COOLDOWN_MINUTES, PAPER_TRADING, PORTFOLIO_VALUE
 from core.data_pipeline import DataPipeline
 from core.signal_aggregator import SignalAggregator
 from core.execution_engine import ExecutionEngine
@@ -47,7 +47,7 @@ class QuilBot:
         self.data_pipeline = DataPipeline()
         self.detector = CrimePumpDetector()
         self.signal_aggregator = SignalAggregator()
-        self.risk_manager = RiskManager(portfolio_value_usd=1000.0)
+        self.risk_manager = RiskManager(portfolio_value_usd=PORTFOLIO_VALUE)
         self.position_monitor = PositionMonitor(
             data_pipeline=self.data_pipeline,
         )
@@ -115,6 +115,7 @@ class QuilBot:
         await self.telegram.send_message(
             f"🟢 Quil Crime Pump Detection Engine is online.\n"
             f"Mode: {mode}\n"
+            f"Budget: ${PORTFOLIO_VALUE:,.0f}\n"
             f"Autonomous scanning active. Send /help for commands."
         )
 

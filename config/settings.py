@@ -61,6 +61,11 @@ EXCHANGE_CONFIGS = {
 TRADING_MODE = os.getenv("TRADING_MODE", "paper").lower()
 PAPER_TRADING = TRADING_MODE != "live"
 
+# ── Portfolio Budget ──────────────────────────────────────────────────────────
+# Total USD budget for position sizing. Each trade uses a % of this.
+# Set via PORTFOLIO_VALUE env var in Railway. Default $1000.
+PORTFOLIO_VALUE = float(os.getenv("PORTFOLIO_VALUE", "1000.0"))
+
 # ── Social ────────────────────────────────────────────────────────────────────
 TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN", "")
 
