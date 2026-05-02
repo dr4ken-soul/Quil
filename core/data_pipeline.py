@@ -85,6 +85,29 @@ class DataPipeline:
             pairs = await self.dexscreener.get_token_pairs(query)
 
         if not pairs:
+            # If we have an exchange price but no DexScreener data,
+            # build a minimal token so CEX-only tokens (e.g., BRETT) still work
+            if exchange_price:
+                ticker = query.upper().replace("$", "")
+                token = Token(
+                    symbol=ticker,
+                    name=ticker,
+                    metrics=TokenMetrics(
+                        price=exchange_price,
+                        market_cap=0,
+                        volume_24h=0,
+                        volume_1h=0,
+                        volume_5m=0,
+                        liquidity_usd=0,
+                        price_change_1h=0,
+                        price_change_24h=0,
+                    ),
+                )
+                token.last_updated = datetime.utcnow()
+                log.info("token_profile_built_minimal", symbol=ticker,
+                        price=exchange_price, source=price_source)
+                return token
+
             log.warning("token_not_found", query=query)
             return None
 

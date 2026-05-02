@@ -1616,6 +1616,8 @@ async def positions_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         entry = pos["entry_price"]
         current = pos["current_price"]
         pnl = pos["pnl_pct"]
+        size = pos.get("size_usd", 0)
+        pnl_usd = size * pnl / 100 if size > 0 else 0
         pnl_emoji = "🟢" if pnl >= 0 else "🔴"
         entry_str = f"${entry:.6f}" if entry < 1 else f"${entry:,.2f}"
         current_str = f"${current:.6f}" if current < 1 else f"${current:,.2f}"
@@ -1624,6 +1626,9 @@ async def positions_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         lines.append(f"  Entry: {entry_str}")
         lines.append(f"  Current: {current_str}")
         lines.append(f"  PnL: {pnl:+.1f}%")
+        if size > 0:
+            lines.append(f"  💵 Size: ${size:,.2f} USDT")
+            lines.append(f"  💰 PnL: ${pnl_usd:+,.2f}")
         if pos["leverage"] > 1:
             lines.append(f"  Leverage: {pos['leverage']}x")
         if pos["stop_loss"] > 0:

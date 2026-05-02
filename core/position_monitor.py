@@ -151,16 +151,22 @@ class TrackedPosition:
         if not self.is_open:
             return triggered
 
-        # Check TP1
+        # Check TP1 (partial profit alert, position stays open)
         if self.take_profit_1 > 0 and "TP1" not in self.fired_alerts:
             if self._price_crossed(self.take_profit_1):
-                triggered.append(self._make_alert(AlertType.TP1_HIT, self.take_profit_1))
+                triggered.append(self._make_alert(
+                    AlertType.TP1_HIT, self.take_profit_1,
+                    extra="Consider taking partial profits and moving SL to breakeven."
+                ))
                 self.fired_alerts.add("TP1")
 
-        # Check TP2
+        # Check TP2 (final target — close the position)
         if self.take_profit_2 > 0 and "TP2" not in self.fired_alerts:
             if self._price_crossed(self.take_profit_2):
-                triggered.append(self._make_alert(AlertType.TP2_HIT, self.take_profit_2))
+                triggered.append(self._make_alert(
+                    AlertType.TP2_HIT, self.take_profit_2,
+                    extra="Final take profit hit. Consider closing the remaining position."
+                ))
                 self.fired_alerts.add("TP2")
 
         # Check Stop Loss
@@ -482,8 +488,8 @@ class PositionMonitor:
                             position._best_price = current_price
                         best = position._best_price
                         unrealized = (best - position.entry_price) / position.entry_price * 100
-                        if unrealized >= 1.0:  # Activate trailing at 1.0% (was 1.5%)
-                            trail_price = position.entry_price * (1 + unrealized * 0.5 / 100)
+                        if unrealized >= 5.0:  # Activate trailing at 5% profit
+                            trail_price = position.entry_price * (1 + unrealized * 0.3 / 100)
                             if trail_price > position.stop_loss:
                                 old_sl = position.stop_loss
                                 position.stop_loss = trail_price
@@ -496,8 +502,8 @@ class PositionMonitor:
                             position._best_price = current_price
                         best = position._best_price
                         unrealized = (position.entry_price - best) / position.entry_price * 100
-                        if unrealized >= 1.0:  # Activate trailing at 1.0% (was 1.5%)
-                            trail_price = position.entry_price * (1 - unrealized * 0.5 / 100)
+                        if unrealized >= 5.0:  # Activate trailing at 5% profit
+                            trail_price = position.entry_price * (1 - unrealized * 0.3 / 100)
                             if trail_price < position.stop_loss:
                                 old_sl = position.stop_loss
                                 position.stop_loss = trail_price
