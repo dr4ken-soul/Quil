@@ -493,18 +493,60 @@ class PositionMonitor:
                         log.warning("sl_check_on_load_failed",
                                    symbol=symbol, error=str(check_err))
 
+                tp1 = p.get("take_profit_1", 0)
+                tp2 = p.get("take_profit_2", 0)
+                leverage = p.get("leverage", 1)
+
                 position = TrackedPosition(
                     position_id=pos_id,
                     symbol=symbol,
                     direction=direction,
                     entry_price=entry_price,
                     stop_loss=stop_loss,
-                    take_profit_1=p.get("take_profit_1", 0),
-                    take_profit_2=p.get("take_profit_2", 0),
-                    leverage=p.get("leverage", 1),
+                    take_profit_1=tp1,
+                    take_profit_2=tp2,
+                    leverage=leverage,
                     size_usd=p.get("size_usd", 0),
                     liquidation_price=p.get("liquidation_price", 0),
                 )
+
+                # Pre-populate fired_alerts based on current price
+                # so we don't re-fire old alerts on restart
+                try:
+                    current = None
+                    if self._data_pipeline:
+                        token = await self._data_pipeline.build_token_profile(symbol)
+                        if token and token.metrics.price > 0:
+                            current = token.metrics.price
+
+                    if current and current > 0:
+                        position.current_price = current
+
+                        # Check if TP levels already crossed
+                        if tp1 > 0:
+                            crossed = (current >= tp1) if direction == "LONG" else (current <= tp1)
+                            if crossed:
+                                position.fired_alerts.add("TP1")
+
+                        if tp2 > 0:
+                            crossed = (current >= tp2) if direction == "LONG" else (current <= tp2)
+                            if crossed:
+                                position.fired_alerts.add("TP2")
+
+                        # Check if profit thresholds already crossed
+                        pnl = position.pnl_pct
+                        for pct in position.profit_alert_pcts:
+                            if pnl >= pct:
+                                position.fired_alerts.add(f"PROFIT_{pct}")
+
+                        if position.fired_alerts:
+                            log.info("alerts_pre_marked",
+                                    symbol=symbol,
+                                    fired=list(position.fired_alerts))
+                except Exception as mark_err:
+                    log.warning("alert_pre_mark_failed",
+                               symbol=symbol, error=str(mark_err))
+
                 self._positions[f"{symbol}_{pos_id}"] = position
 
             if positions:
