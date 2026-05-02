@@ -590,6 +590,197 @@ class ExecutionEngine:
                        exchange=exchange_name, error=str(e))
             return None
 
+    async def modify_stop_loss(self, ticker: str, new_sl: float) -> dict:
+        """
+        Modify the SL on a live exchange position.
+        Cancels the old SL conditional order and places a new one.
+        """
+        order_info = self._active_orders.get(ticker)
+        if not order_info:
+            return {"success": False, "reason": f"No active order found for {ticker}"}
+
+        exchange_name = order_info["exchange"]
+        exchange = self._exchanges.get(exchange_name)
+        if not exchange:
+            return {"success": False, "reason": f"Exchange {exchange_name} not connected"}
+
+        symbol = order_info["symbol"]
+        old_sl_id = order_info.get("sl_order")
+        direction = order_info["direction"]
+        amount = order_info["amount"]
+
+        try:
+            # Cancel old SL order
+            if old_sl_id:
+                try:
+                    await exchange.cancel_order(old_sl_id, symbol)
+                    log.info("old_sl_cancelled", order_id=old_sl_id)
+                except Exception as cancel_err:
+                    log.warning("sl_cancel_failed", error=str(cancel_err))
+
+            # Place new SL
+            sl_side = "sell" if direction == "LONG" else "buy"
+            trigger_dir = 2 if direction == "LONG" else 1
+
+            if exchange_name == "bybit":
+                order = await exchange.create_order(
+                    symbol=symbol,
+                    type="market",
+                    side=sl_side,
+                    amount=amount,
+                    params={
+                        "triggerPrice": str(new_sl),
+                        "triggerDirection": trigger_dir,
+                        "orderType": "Market",
+                        "reduceOnly": True,
+                    },
+                )
+            else:
+                order = await exchange.create_order(
+                    symbol=symbol,
+                    type="stop_market",
+                    side=sl_side,
+                    amount=amount,
+                    params={
+                        "stopPrice": new_sl,
+                        "reduceOnly": True,
+                    },
+                )
+
+            new_sl_id = order.get("id")
+            self._active_orders[ticker]["sl_order"] = new_sl_id
+            log.info("sl_modified", symbol=symbol, new_sl=new_sl, order_id=new_sl_id)
+
+            return {"success": True, "order_id": new_sl_id, "new_sl": new_sl}
+
+        except Exception as e:
+            log.error("sl_modify_failed", symbol=symbol, error=str(e))
+            return {"success": False, "reason": str(e)}
+
+    async def modify_take_profit(self, ticker: str, new_tp: float) -> dict:
+        """
+        Modify the TP on a live exchange position.
+        Cancels the old TP conditional order and places a new one.
+        """
+        order_info = self._active_orders.get(ticker)
+        if not order_info:
+            return {"success": False, "reason": f"No active order found for {ticker}"}
+
+        exchange_name = order_info["exchange"]
+        exchange = self._exchanges.get(exchange_name)
+        if not exchange:
+            return {"success": False, "reason": f"Exchange {exchange_name} not connected"}
+
+        symbol = order_info["symbol"]
+        old_tp_id = order_info.get("tp_order")
+        direction = order_info["direction"]
+        amount = order_info["amount"]
+
+        try:
+            # Cancel old TP order
+            if old_tp_id:
+                try:
+                    await exchange.cancel_order(old_tp_id, symbol)
+                    log.info("old_tp_cancelled", order_id=old_tp_id)
+                except Exception as cancel_err:
+                    log.warning("tp_cancel_failed", error=str(cancel_err))
+
+            # Place new TP
+            tp_side = "sell" if direction == "LONG" else "buy"
+            trigger_dir = 1 if direction == "LONG" else 2
+
+            if exchange_name == "bybit":
+                order = await exchange.create_order(
+                    symbol=symbol,
+                    type="market",
+                    side=tp_side,
+                    amount=amount,
+                    params={
+                        "triggerPrice": str(new_tp),
+                        "triggerDirection": trigger_dir,
+                        "orderType": "Market",
+                        "reduceOnly": True,
+                    },
+                )
+            else:
+                order = await exchange.create_order(
+                    symbol=symbol,
+                    type="take_profit_market",
+                    side=tp_side,
+                    amount=amount,
+                    params={
+                        "stopPrice": new_tp,
+                        "reduceOnly": True,
+                    },
+                )
+
+            new_tp_id = order.get("id")
+            self._active_orders[ticker]["tp_order"] = new_tp_id
+            log.info("tp_modified", symbol=symbol, new_tp=new_tp, order_id=new_tp_id)
+
+            return {"success": True, "order_id": new_tp_id, "new_tp": new_tp}
+
+        except Exception as e:
+            log.error("tp_modify_failed", symbol=symbol, error=str(e))
+            return {"success": False, "reason": str(e)}
+
+    async def close_partial(self, ticker: str, close_pct: float = 50.0) -> dict:
+        """
+        Close a percentage of a live position (take partial profits).
+        close_pct: percentage to close (e.g. 50 = close 50%)
+        """
+        order_info = self._active_orders.get(ticker)
+        if not order_info:
+            return {"success": False, "reason": f"No active order found for {ticker}"}
+
+        exchange_name = order_info["exchange"]
+        exchange = self._exchanges.get(exchange_name)
+        if not exchange:
+            return {"success": False, "reason": f"Exchange {exchange_name} not connected"}
+
+        symbol = order_info["symbol"]
+        direction = order_info["direction"]
+        total_amount = order_info["amount"]
+        close_amount = total_amount * (close_pct / 100.0)
+
+        try:
+            # Place market order to close partial
+            close_side = "sell" if direction == "LONG" else "buy"
+
+            order = await exchange.create_order(
+                symbol=symbol,
+                type="market",
+                side=close_side,
+                amount=close_amount,
+                params={"reduceOnly": True},
+            )
+
+            order_id = order.get("id")
+            fill_price = order.get("average") or order.get("price", 0)
+
+            # Update remaining amount
+            self._active_orders[ticker]["amount"] = total_amount - close_amount
+
+            log.info("partial_close",
+                    symbol=symbol,
+                    closed_pct=close_pct,
+                    closed_amount=close_amount,
+                    remaining=total_amount - close_amount,
+                    fill_price=fill_price)
+
+            return {
+                "success": True,
+                "order_id": order_id,
+                "closed_pct": close_pct,
+                "closed_amount": close_amount,
+                "remaining_amount": total_amount - close_amount,
+                "fill_price": fill_price,
+            }
+
+        except Exception as e:
+            log.error("partial_close_failed", symbol=symbol, error=str(e))
+            return {"success": False, "reason": str(e)}
+
     async def _auto_track_position(self, signal: TradeSignal,
                                      exchange_name: str,
                                      fill_price: float = None,

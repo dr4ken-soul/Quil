@@ -87,6 +87,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "/close [ticker] - Stop tracking a position\n"
         "/movesl [ticker] [price] - Move stop loss on active position\n"
         "/movetp [ticker] [price] - Move take profit on active position\n"
+        "/partial [ticker] [%] - Take partial profits (e.g. /partial BTC 50)\n"
         "/setalert [ticker] [price] - Set custom price alert\n"
         "/watch [ticker] - Add to monitoring watchlist\n"
         "/watchlist - View active watchlist\n"
@@ -1076,11 +1077,21 @@ async def movesl_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     price_fmt = lambda p: f"${p:,.6f}" if p < 1 else f"${p:,.2f}"
 
+    # In live mode, also modify on the exchange
+    exchange_msg = ""
+    if _execution_engine and not _execution_engine.paper_trading:
+        result = await _execution_engine.modify_stop_loss(ticker, new_sl)
+        if result["success"]:
+            exchange_msg = "\n📡 Exchange SL order updated ✅"
+        else:
+            exchange_msg = f"\n⚠️ Exchange update failed: {result['reason']}"
+
     await update.message.reply_text(
         f"✅ Stop Loss updated for ${ticker}\n\n"
         f"Old SL: {price_fmt(old_sl)}\n"
-        f"New SL: {price_fmt(new_sl)}\n\n"
+        f"New SL: {price_fmt(new_sl)}\n"
         f"{'🛡️ SL moved to breakeven!' if price_arg in ('breakeven', 'be') else ''}"
+        f"{exchange_msg}"
     )
 
 
@@ -1126,11 +1137,98 @@ async def movetp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     price_fmt = lambda p: f"${p:,.6f}" if p < 1 else f"${p:,.2f}"
 
+    # In live mode, also modify on the exchange
+    exchange_msg = ""
+    if _execution_engine and not _execution_engine.paper_trading:
+        result = await _execution_engine.modify_take_profit(ticker, new_tp)
+        if result["success"]:
+            exchange_msg = "\n📡 Exchange TP order updated ✅"
+        else:
+            exchange_msg = f"\n⚠️ Exchange update failed: {result['reason']}"
+
     await update.message.reply_text(
         f"✅ Take Profit updated for ${ticker}\n\n"
         f"Old TP: {price_fmt(old_tp)}\n"
         f"New TP: {price_fmt(new_tp)}"
+        f"{exchange_msg}"
     )
+
+
+async def partial_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Take partial profits on an active position.
+
+    Usage: /partial [ticker] [percentage]
+    Example: /partial BTC 50  → close 50% of BTC position
+    Default: 50% if no percentage given
+    """
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /partial [ticker] [percentage]\n"
+            "Example: /partial BTC 50\n"
+            "Default: closes 50% if no percentage given"
+        )
+        return
+
+    if not _position_monitor:
+        await update.message.reply_text("Position monitor not available.")
+        return
+
+    ticker = context.args[0].upper().replace("$", "")
+    close_pct = 50.0  # Default
+
+    if len(context.args) >= 2:
+        try:
+            close_pct = float(context.args[1].replace("%", ""))
+        except ValueError:
+            await update.message.reply_text("Invalid percentage. Use a number (e.g. 50).")
+            return
+
+    if close_pct <= 0 or close_pct > 100:
+        await update.message.reply_text("Percentage must be between 1 and 100.")
+        return
+
+    # Find the active position
+    position = None
+    for pos in _position_monitor.active_positions:
+        if pos.symbol.upper() == ticker:
+            position = pos
+            break
+
+    if not position:
+        await update.message.reply_text(f"No active position found for ${ticker}.")
+        return
+
+    # In live mode, execute on exchange
+    if _execution_engine and not _execution_engine.paper_trading:
+        result = await _execution_engine.close_partial(ticker, close_pct)
+        if result["success"]:
+            # Update position size in tracker
+            position.size_usd *= (1 - close_pct / 100)
+            await update.message.reply_text(
+                f"✅ Partial Close: ${ticker}\n\n"
+                f"Closed: {close_pct:.0f}% of position\n"
+                f"Fill Price: ${result['fill_price']:,.2f}\n"
+                f"Remaining: {100 - close_pct:.0f}%\n\n"
+                f"📡 Exchange order filled ✅"
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ Partial close failed: {result['reason']}"
+            )
+    else:
+        # Paper mode — just update the size
+        old_size = position.size_usd
+        position.size_usd *= (1 - close_pct / 100)
+        pnl_realized = old_size * (close_pct / 100) * position.pnl_pct / 100
+
+        await update.message.reply_text(
+            f"✅ Partial Close (Paper): ${ticker}\n\n"
+            f"Closed: {close_pct:.0f}% of position\n"
+            f"Realized PnL: ${pnl_realized:+,.2f}\n"
+            f"Remaining Size: ${position.size_usd:,.2f} USDT\n"
+            f"Remaining: {100 - close_pct:.0f}%"
+        )
 
 
 async def _handle_confirm_trade(query, confirm_id: str) -> None:
