@@ -29,6 +29,7 @@ from telegram_bot.handlers import (
     calc_command,
     backtest_command,
     sell_command,
+    set_command,
     watch_command,
     watchlist_command,
     alerts_command,
@@ -117,6 +118,7 @@ class QuilTelegramBot:
         self.app.add_handler(CommandHandler("alerts", alerts_command))
         self.app.add_handler(CommandHandler("status", status_command))
         self.app.add_handler(CommandHandler("sell", sell_command))
+        self.app.add_handler(CommandHandler("set", set_command))
         self.app.add_handler(CommandHandler("stats", stats_command))
         self.app.add_handler(CommandHandler("pending", pending_command))
 

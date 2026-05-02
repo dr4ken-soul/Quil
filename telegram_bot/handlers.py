@@ -491,6 +491,8 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle inline keyboard button presses."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
     query = update.callback_query
     await query.answer()
 
@@ -527,6 +529,52 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif data.startswith("confirm_limit:"):
         confirm_id = data.split(":", 1)[1]
         await _handle_confirm_limit_trade(query, confirm_id)
+
+    elif data.startswith("modify_amount:"):
+        confirm_id = data.split(":", 1)[1]
+        await _handle_modify_amount(query, confirm_id)
+
+    elif data.startswith("modify_leverage:"):
+        confirm_id = data.split(":", 1)[1]
+        await _handle_modify_leverage(query, confirm_id)
+
+    elif data.startswith("modify_sl:") or data.startswith("modify_tp:") or data.startswith("modify_entry:"):
+        confirm_id = data.split(":", 1)[1]
+        await query.edit_message_text(
+            "📝 To set a custom SL/TP/Entry, use the command:\n\n"
+            f"/set {data.split(':')[0].replace('modify_', '')} [price] {confirm_id}\n\n"
+            "Example: /set sl 75000 " + confirm_id + "\n\n"
+            "Or tap Back to return.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data=f"back_confirm:{confirm_id}")]
+            ])
+        )
+
+    elif data.startswith("set_amount:"):
+        parts = data.split(":")
+        amount = float(parts[1])
+        confirm_id = parts[2]
+        pending = _execution_engine.get_pending_trade(confirm_id)
+        if pending:
+            pending["custom_amount"] = amount
+            await _show_confirmation_screen(query, confirm_id)
+        else:
+            await query.edit_message_text("⏰ Trade expired.")
+
+    elif data.startswith("set_leverage:"):
+        parts = data.split(":")
+        lev = int(parts[1])
+        confirm_id = parts[2]
+        pending = _execution_engine.get_pending_trade(confirm_id)
+        if pending:
+            pending["signal"].risk.leverage = lev
+            await _show_confirmation_screen(query, confirm_id)
+        else:
+            await query.edit_message_text("⏰ Trade expired.")
+
+    elif data.startswith("back_confirm:"):
+        confirm_id = data.split(":", 1)[1]
+        await _show_confirmation_screen(query, confirm_id)
 
     elif data == "refresh_positions":
         await _handle_refresh_positions(query)
@@ -616,8 +664,89 @@ async def sell_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(f"Error: {str(e)[:200]}")
 
 
+def _build_confirmation_message(signal, token, confirm_id, execution_engine):
+    """Build the trade confirmation message with current parameters."""
+    from config.settings import PORTFOLIO_VALUE
+
+    mode = "📝 PAPER" if execution_engine.paper_trading else "🔴 LIVE"
+    direction_emoji = "📈" if signal.direction.value == "long" else "📉"
+    direction = signal.direction.value.upper()
+
+    entry = signal.risk.entry_price
+    sl = signal.risk.stop_loss
+    tp1 = signal.risk.take_profit_1
+    tp2 = signal.risk.take_profit_2
+    leverage = signal.risk.leverage or 3
+    rr = signal.risk.risk_reward
+    confidence = signal.confidence
+    sl_pct = abs(entry - sl) / entry * 100 if entry > 0 else 0
+
+    price_fmt = lambda p: f"${p:,.6f}" if p < 1 else f"${p:,.2f}"
+
+    # Check if custom amount was set
+    pending = execution_engine.get_pending_trade(confirm_id)
+    custom_amount = pending.get("custom_amount") if pending else None
+
+    if custom_amount:
+        order_cost = custom_amount
+    else:
+        pos_size_pct = signal.risk.position_size_pct
+        portfolio = execution_engine.risk_manager.portfolio_value
+        order_cost = pos_size_pct * portfolio / 100
+
+    # Liq price estimate
+    mmr = 0.025
+    fee = 0.0006
+    imr = 1.0 / leverage
+    if direction == "LONG":
+        liq_price = entry * (1 - imr + mmr + fee)
+    else:
+        liq_price = entry * (1 + imr - mmr - fee)
+
+    # Optimal limit entry
+    limit_calc = execution_engine.calculate_optimal_entry(signal, token)
+    limit_price = limit_calc["limit_price"]
+    limit_offset = limit_calc["offset_pct"]
+
+    confirm_msg = (
+        f"⚠️ TRADE CONFIRMATION ({mode})\n"
+        f"{'=' * 30}\n\n"
+        f"Token: ${signal.token_symbol}\n"
+        f"Direction: {direction_emoji} {direction}\n\n"
+        f"💰 Order Details:\n"
+        f"  Market Price: {price_fmt(entry)}\n"
+        f"  Limit Price: {price_fmt(limit_price)} ({limit_offset:.1f}% better)\n"
+        f"  💵 Amount: ${order_cost:.2f} USDT"
+    )
+
+    if custom_amount:
+        confirm_msg += " (custom)\n"
+    else:
+        confirm_msg += f" ({signal.risk.position_size_pct:.1f}% of portfolio)\n"
+
+    confirm_msg += (
+        f"  Leverage: {leverage}x (Isolated)\n\n"
+        f"🛡️ Risk Management:\n"
+        f"  Stop Loss: {price_fmt(sl)} ({sl_pct:.1f}% away)\n"
+        f"  Take Profit 1: {price_fmt(tp1)}\n"
+        f"  Take Profit 2: {price_fmt(tp2)}\n"
+        f"  Risk/Reward: {rr:.1f}:1\n\n"
+        f"📊 Position Info:\n"
+        f"  Est. Liq. Price: {price_fmt(liq_price)}\n"
+        f"  Confidence: {confidence:.0%}\n\n"
+        f"Tap a button below to modify, or proceed:\n"
+    )
+
+    if execution_engine.paper_trading:
+        confirm_msg += "📝 This is a PAPER trade."
+    else:
+        confirm_msg += "🔴 REAL order — real money at risk!"
+
+    return confirm_msg
+
+
 async def _handle_execute_trade(query, token_symbol: str) -> None:
-    """Handle the 'Execute Trade' button. Shows confirmation before executing."""
+    """Handle the 'Execute Trade' button. Shows confirmation with modify buttons."""
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
     if _execution_engine is None or _signal_aggregator is None:
@@ -625,7 +754,6 @@ async def _handle_execute_trade(query, token_symbol: str) -> None:
         return
 
     try:
-        # Build fresh signal for execution
         if _data_pipeline is None:
             await query.edit_message_text("Data pipeline not available.")
             return
@@ -657,94 +785,192 @@ async def _handle_execute_trade(query, token_symbol: str) -> None:
             token_symbol, signal, token
         )
 
-        # Build Bybit-style confirmation message
-        mode = "📝 PAPER" if _execution_engine.paper_trading else "🔴 LIVE"
-        direction_emoji = "📈" if signal.direction.value == "long" else "📉"
-        direction = signal.direction.value.upper()
-
-        entry = signal.risk.entry_price
-        sl = signal.risk.stop_loss
-        tp1 = signal.risk.take_profit_1
-        tp2 = signal.risk.take_profit_2
-        leverage = signal.risk.leverage or 3
-        rr = signal.risk.risk_reward
-        confidence = signal.confidence
-        sl_pct = abs(entry - sl) / entry * 100 if entry > 0 else 0
-
-        price_fmt = lambda p: f"${p:,.6f}" if p < 1 else f"${p:,.2f}"
-
-        # Calculate estimated order cost and liq price
-        pos_size_pct = signal.risk.position_size_pct
-        portfolio = _execution_engine.risk_manager.portfolio_value
-        order_cost = pos_size_pct * portfolio / 100
-
-        # Liq price estimate (Bybit-style with 2.5% MMR for altcoins)
-        mmr = 0.025
-        fee = 0.0006
-        imr = 1.0 / leverage
-        if direction == "LONG":
-            liq_price = entry * (1 - imr + mmr + fee)
-        else:
-            liq_price = entry * (1 + imr - mmr - fee)
-
-        # Calculate optimal limit entry
-        limit_calc = _execution_engine.calculate_optimal_entry(signal, token)
-        limit_price = limit_calc["limit_price"]
-        limit_offset = limit_calc["offset_pct"]
-
-        confirm_msg = (
-            f"⚠️ TRADE CONFIRMATION ({mode})\n"
-            f"{'=' * 30}\n\n"
-            f"Token: ${token_symbol}\n"
-            f"Direction: {direction_emoji} {direction}\n\n"
-            f"💰 Order Details:\n"
-            f"  Market Price: {price_fmt(entry)}\n"
-            f"  Limit Price: {price_fmt(limit_price)} ({limit_offset:.1f}% better)\n"
-            f"  Order Cost: ~${order_cost:.2f} USDT\n"
-            f"  Leverage: {leverage}x (Isolated)\n\n"
-            f"🛡️ Risk Management:\n"
-            f"  Stop Loss: {price_fmt(sl)} ({sl_pct:.1f}% away)\n"
-            f"  Take Profit 1: {price_fmt(tp1)}\n"
-            f"  Take Profit 2: {price_fmt(tp2)}\n"
-            f"  Risk/Reward: {rr:.1f}:1\n\n"
-            f"📊 Position Info:\n"
-            f"  Est. Liq. Price: {price_fmt(liq_price)}\n"
-            f"  Confidence: {confidence:.0%}\n"
-            f"  Position Size: {pos_size_pct:.1f}% of portfolio\n\n"
-        )
-
-        if _execution_engine.paper_trading:
-            confirm_msg += "📝 This is a PAPER trade. No real money involved."
-        else:
-            confirm_msg += (
-                "🔴 This will place a REAL order on your exchange!\n"
-                "Real money is at risk. Confirm only if you are sure."
-            )
-
-        buttons = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "⚡ Market Order",
-                    callback_data=f"confirm_trade:{confirm_id}"
-                ),
-                InlineKeyboardButton(
-                    f"📊 Limit Order",
-                    callback_data=f"confirm_limit:{confirm_id}"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "❌ Cancel",
-                    callback_data=f"cancel_trade:{confirm_id}"
-                ),
-            ],
-        ])
-
-        await query.edit_message_text(confirm_msg, reply_markup=buttons)
+        # Show the interactive confirmation screen
+        await _show_confirmation_screen(query, confirm_id)
 
     except Exception as e:
         log.error("execute_trade_error", token=token_symbol, error=str(e))
         await query.edit_message_text(f"Error preparing trade: {str(e)[:200]}")
+
+
+async def _show_confirmation_screen(query, confirm_id: str) -> None:
+    """Show the confirmation screen with modify buttons."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    pending = _execution_engine.get_pending_trade(confirm_id)
+    if not pending:
+        await query.edit_message_text("⏰ Trade expired. Run /trade again.")
+        return
+
+    signal = pending["signal"]
+    token = pending["token"]
+
+    confirm_msg = _build_confirmation_message(
+        signal, token, confirm_id, _execution_engine
+    )
+
+    buttons = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("💵 Amount", callback_data=f"modify_amount:{confirm_id}"),
+            InlineKeyboardButton("⚡ Leverage", callback_data=f"modify_leverage:{confirm_id}"),
+        ],
+        [
+            InlineKeyboardButton("🔴 Stop Loss", callback_data=f"modify_sl:{confirm_id}"),
+            InlineKeyboardButton("🟢 Take Profit", callback_data=f"modify_tp:{confirm_id}"),
+        ],
+        [
+            InlineKeyboardButton("📍 Entry Price", callback_data=f"modify_entry:{confirm_id}"),
+        ],
+        [
+            InlineKeyboardButton("⚡ Market Order", callback_data=f"confirm_trade:{confirm_id}"),
+            InlineKeyboardButton("📊 Limit Order", callback_data=f"confirm_limit:{confirm_id}"),
+        ],
+        [
+            InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_trade:{confirm_id}"),
+        ],
+    ])
+
+    await query.edit_message_text(confirm_msg, reply_markup=buttons)
+
+
+async def _handle_modify_amount(query, confirm_id: str) -> None:
+    """Show amount selection buttons."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    pending = _execution_engine.get_pending_trade(confirm_id)
+    if not pending:
+        await query.edit_message_text("⏰ Trade expired. Run /trade again.")
+        return
+
+    buttons = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("$5", callback_data=f"set_amount:5:{confirm_id}"),
+            InlineKeyboardButton("$10", callback_data=f"set_amount:10:{confirm_id}"),
+            InlineKeyboardButton("$25", callback_data=f"set_amount:25:{confirm_id}"),
+        ],
+        [
+            InlineKeyboardButton("$50", callback_data=f"set_amount:50:{confirm_id}"),
+            InlineKeyboardButton("$100", callback_data=f"set_amount:100:{confirm_id}"),
+            InlineKeyboardButton("$250", callback_data=f"set_amount:250:{confirm_id}"),
+        ],
+        [
+            InlineKeyboardButton("$500", callback_data=f"set_amount:500:{confirm_id}"),
+            InlineKeyboardButton("$1000", callback_data=f"set_amount:1000:{confirm_id}"),
+        ],
+        [
+            InlineKeyboardButton("🔙 Back", callback_data=f"back_confirm:{confirm_id}"),
+        ],
+    ])
+
+    await query.edit_message_text(
+        "💵 Select trade amount (USDT):\n\n"
+        "This overrides the default position sizing.",
+        reply_markup=buttons
+    )
+
+
+async def _handle_modify_leverage(query, confirm_id: str) -> None:
+    """Show leverage selection buttons."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    pending = _execution_engine.get_pending_trade(confirm_id)
+    if not pending:
+        await query.edit_message_text("⏰ Trade expired. Run /trade again.")
+        return
+
+    buttons = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("1x", callback_data=f"set_leverage:1:{confirm_id}"),
+            InlineKeyboardButton("2x", callback_data=f"set_leverage:2:{confirm_id}"),
+            InlineKeyboardButton("3x", callback_data=f"set_leverage:3:{confirm_id}"),
+        ],
+        [
+            InlineKeyboardButton("5x", callback_data=f"set_leverage:5:{confirm_id}"),
+            InlineKeyboardButton("10x", callback_data=f"set_leverage:10:{confirm_id}"),
+            InlineKeyboardButton("20x", callback_data=f"set_leverage:20:{confirm_id}"),
+        ],
+        [
+            InlineKeyboardButton("🔙 Back", callback_data=f"back_confirm:{confirm_id}"),
+        ],
+    ])
+
+    await query.edit_message_text(
+        "⚡ Select leverage:\n\n"
+        "⚠️ Higher leverage = higher risk of liquidation.",
+        reply_markup=buttons
+    )
+
+
+async def set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handle /set command to modify pending trade parameters.
+
+    Usage:
+        /set sl 75000 abc12345
+        /set tp 80000 abc12345
+        /set entry 76000 abc12345
+    """
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    if not context.args or len(context.args) < 3:
+        await update.message.reply_text(
+            "Usage: /set [sl|tp|entry] [price] [confirm_id]\n"
+            "Example: /set sl 75000 abc12345"
+        )
+        return
+
+    if _execution_engine is None:
+        await update.message.reply_text("Bot not initialized.")
+        return
+
+    param = context.args[0].lower()
+    try:
+        price = float(context.args[1])
+    except ValueError:
+        await update.message.reply_text("Invalid price. Use a number.")
+        return
+
+    confirm_id = context.args[2]
+
+    pending = _execution_engine.get_pending_trade(confirm_id)
+    if not pending:
+        await update.message.reply_text("⏰ Trade expired. Run /trade again.")
+        return
+
+    signal = pending["signal"]
+
+    if param == "sl":
+        signal.risk.stop_loss = price
+        label = "Stop Loss"
+    elif param == "tp":
+        signal.risk.take_profit_1 = price
+        label = "Take Profit 1"
+    elif param == "entry":
+        signal.risk.entry_price = price
+        label = "Entry Price"
+    else:
+        await update.message.reply_text("Unknown parameter. Use: sl, tp, or entry")
+        return
+
+    # Recalculate risk/reward
+    entry = signal.risk.entry_price
+    sl = signal.risk.stop_loss
+    tp1 = signal.risk.take_profit_1
+    if entry > 0 and sl > 0 and abs(entry - sl) > 0:
+        signal.risk.risk_reward = abs(tp1 - entry) / abs(entry - sl)
+
+    price_fmt = f"${price:,.6f}" if price < 1 else f"${price:,.2f}"
+
+    # Send confirmation and show a button to go back
+    buttons = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Back to Confirmation", callback_data=f"back_confirm:{confirm_id}")]
+    ])
+
+    await update.message.reply_text(
+        f"✅ {label} updated to {price_fmt}\n\n"
+        "Tap below to return to the trade confirmation.",
+        reply_markup=buttons
+    )
 
 
 async def _handle_confirm_trade(query, confirm_id: str) -> None:
@@ -753,7 +979,7 @@ async def _handle_confirm_trade(query, confirm_id: str) -> None:
         await query.edit_message_text("Execution engine not available.")
         return
 
-    pending = _execution_engine.get_pending_trade(confirm_id)
+    pending = _execution_engine.consume_pending_trade(confirm_id)
     if not pending:
         await query.edit_message_text(
             "⏰ Trade confirmation expired (5 minute limit). "
@@ -763,13 +989,16 @@ async def _handle_confirm_trade(query, confirm_id: str) -> None:
 
     signal = pending["signal"]
     token = pending["token"]
+    custom_amount = pending.get("custom_amount")
 
     try:
         await query.edit_message_text(
             f"⏳ Executing {signal.direction.value.upper()} on ${signal.token_symbol}..."
         )
 
-        result = await _execution_engine.execute_trade(signal, token)
+        result = await _execution_engine.execute_trade(
+            signal, token, position_size_usd=custom_amount
+        )
 
         if result.get("executed"):
             mode = result["mode"]
@@ -825,7 +1054,7 @@ async def _handle_confirm_limit_trade(query, confirm_id: str) -> None:
         return
 
     try:
-        pending = _execution_engine.get_pending_trade(confirm_id)
+        pending = _execution_engine.consume_pending_trade(confirm_id)
         if pending is None:
             await query.edit_message_text(
                 "⏰ Trade confirmation expired (5 minute limit). "
@@ -835,13 +1064,16 @@ async def _handle_confirm_limit_trade(query, confirm_id: str) -> None:
 
         signal = pending["signal"]
         token = pending["token"]
+        custom_amount = pending.get("custom_amount")
 
         await query.edit_message_text(
             f"📊 Placing LIMIT order for ${signal.token_symbol}...\n"
             f"Calculating optimal entry..."
         )
 
-        result = await _execution_engine.execute_limit_trade(signal, token)
+        result = await _execution_engine.execute_limit_trade(
+            signal, token, position_size_usd=custom_amount
+        )
 
         if result.get("executed"):
             mode = result.get("mode", "paper")

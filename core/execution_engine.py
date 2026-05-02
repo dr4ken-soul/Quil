@@ -116,7 +116,11 @@ class ExecutionEngine:
         return confirm_id
 
     def get_pending_trade(self, confirm_id: str) -> Optional[dict]:
-        """Get a pending trade by confirmation ID."""
+        """Get a pending trade by confirmation ID (does NOT remove it)."""
+        return self._pending_trades.get(confirm_id, None)
+
+    def consume_pending_trade(self, confirm_id: str) -> Optional[dict]:
+        """Get and REMOVE a pending trade (used at final execution)."""
         return self._pending_trades.pop(confirm_id, None)
 
     async def execute_trade(self, signal: TradeSignal, token: Token,
