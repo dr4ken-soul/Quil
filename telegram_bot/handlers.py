@@ -1351,6 +1351,7 @@ async def _handle_refresh_positions(query) -> None:
                 "leverage": dbp.get("leverage", 1),
                 "stop_loss": dbp.get("stop_loss", 0),
                 "take_profit_1": dbp.get("take_profit_1", 0),
+                "size_usd": mem_pos.size_usd if mem_pos else dbp.get("size_usd", 0),
             })
 
         db_symbols = {p.get("symbol", "") for p in db_positions}
@@ -1361,6 +1362,7 @@ async def _handle_refresh_positions(query) -> None:
                     "entry_price": mp.entry_price, "current_price": mp.current_price,
                     "pnl_pct": mp.pnl_pct, "leverage": mp.leverage,
                     "stop_loss": mp.stop_loss, "take_profit_1": mp.take_profit_1,
+                    "size_usd": mp.size_usd,
                 })
 
         lines = [f"📋 Tracked Positions ({len(positions_to_show)})\n"]
@@ -1369,6 +1371,8 @@ async def _handle_refresh_positions(query) -> None:
             entry = pos["entry_price"]
             current = pos["current_price"]
             pnl = pos["pnl_pct"]
+            size = pos.get("size_usd", 0)
+            pnl_usd = size * pnl / 100 if size > 0 else 0
             pnl_emoji = "🟢" if pnl >= 0 else "🔴"
             entry_str = f"${entry:.6f}" if entry < 1 else f"${entry:,.2f}"
             current_str = f"${current:.6f}" if current < 1 else f"${current:,.2f}"
@@ -1377,6 +1381,9 @@ async def _handle_refresh_positions(query) -> None:
             lines.append(f"  Entry: {entry_str}")
             lines.append(f"  Current: {current_str}")
             lines.append(f"  PnL: {pnl:+.1f}%")
+            if size > 0:
+                lines.append(f"  💵 Size: ${size:,.2f} USDT")
+                lines.append(f"  💰 PnL: ${pnl_usd:+,.2f}")
             if pos["leverage"] > 1:
                 lines.append(f"  Leverage: {pos['leverage']}x")
             if pos["stop_loss"] > 0:

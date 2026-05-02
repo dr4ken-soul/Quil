@@ -497,6 +497,18 @@ class PositionMonitor:
                 for alert in triggered_alerts:
                     await self._send_alert(alert)
 
+                # If position was closed by SL/Liquidation, persist to DB
+                if not position.is_open and position.close_reason:
+                    try:
+                        from utils.database import close_position as db_close
+                        await db_close(position.position_id, position.close_reason)
+                        log.info("position_closed_in_db",
+                                symbol=position.symbol,
+                                reason=position.close_reason,
+                                id=position.position_id)
+                    except Exception as db_err:
+                        log.warning("db_close_failed", error=str(db_err))
+
             except Exception as e:
                 log.error("position_check_error",
                          symbol=position.symbol, error=str(e))
