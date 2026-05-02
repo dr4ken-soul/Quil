@@ -194,7 +194,10 @@ class ExecutionEngine:
             self.risk_manager.record_trade_open(adjusted_signal, token)
 
             # Auto-track in position monitor
-            position_id = await self._auto_track_position(adjusted_signal, "paper")
+            position_id = await self._auto_track_position(
+                adjusted_signal, "paper",
+                position_size_usd=position_size_usd
+            )
 
             return {
                 "executed": True,
@@ -589,7 +592,8 @@ class ExecutionEngine:
 
     async def _auto_track_position(self, signal: TradeSignal,
                                      exchange_name: str,
-                                     fill_price: float = None) -> Optional[int]:
+                                     fill_price: float = None,
+                                     position_size_usd: float = None) -> Optional[int]:
         """Auto-save the position to database AND add to live monitor."""
         try:
             entry = fill_price or signal.risk.entry_price
@@ -609,7 +613,7 @@ class ExecutionEngine:
                 "take_profit_1": signal.risk.take_profit_1,
                 "take_profit_2": signal.risk.take_profit_2,
                 "leverage": lev,
-                "size_usd": signal.risk.position_size_pct * self.risk_manager.portfolio_value / 100,
+                "size_usd": position_size_usd or (signal.risk.position_size_pct * self.risk_manager.portfolio_value / 100),
                 "liquidation_price": liq_price,
                 "profit_alerts": "[]",
                 "multiplier_alerts": "[]",

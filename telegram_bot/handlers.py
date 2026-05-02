@@ -2076,17 +2076,51 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     try:
         stats = await get_performance_stats()
 
+        # Get portfolio value and active positions
+        from config.settings import PORTFOLIO_VALUE
+        portfolio = PORTFOLIO_VALUE
+
+        # Active positions data
+        active_positions = []
+        if _position_monitor:
+            active_positions = _position_monitor.active_positions
+
+        active_count = stats.get("active_count", len(active_positions))
+
+        # Calculate active positions totals
+        total_active_invested = sum(p.size_usd for p in active_positions)
+        total_active_pnl_usd = sum(p.pnl_usd for p in active_positions)
+        available_balance = portfolio - total_active_invested
+
         if stats["total_trades"] == 0:
-            # No closed trades yet — show what we have
-            active = stats["active_count"]
-            await update.message.reply_text(
-                "📊 Performance Dashboard\n"
-                f"{'=' * 28}\n\n"
-                "No closed trades yet.\n\n"
-                f"📋 Active Positions: {active}\n\n"
-                "Close positions with /close to start\n"
-                "building your performance history."
-            )
+            lines = [
+                "📊 Performance Dashboard",
+                f"{'=' * 28}\n",
+                "💼 Account Overview:",
+                f"  💰 Portfolio: ${portfolio:,.2f} USDT",
+                f"  📋 Active Positions: {active_count}",
+                f"  💵 In Trades: ${total_active_invested:,.2f}",
+                f"  🏦 Available: ${available_balance:,.2f}",
+            ]
+
+            if total_active_pnl_usd != 0:
+                pnl_emoji = "📈" if total_active_pnl_usd >= 0 else "📉"
+                lines.append(f"  {pnl_emoji} Unrealized PnL: ${total_active_pnl_usd:+,.2f}")
+
+            if active_positions:
+                lines.append(f"\n📋 Active Breakdown:")
+                for p in active_positions:
+                    emoji = "🟢" if p.pnl_pct >= 0 else "🔴"
+                    lines.append(
+                        f"  {emoji} ${p.symbol} ({p.direction}) "
+                        f"${p.size_usd:,.2f} → ${p.pnl_usd:+,.2f}"
+                    )
+
+            lines.append(f"\nNo closed trades yet.")
+            lines.append("Close positions with /close to start")
+            lines.append("building your performance history.")
+
+            await update.message.reply_text("\n".join(lines))
             return
 
         # Build the dashboard
@@ -2099,7 +2133,6 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         avg_loss = stats["avg_loss_pct"]
         pf = stats["profit_factor"]
         avg_lev = stats["avg_leverage"]
-        active = stats["active_count"]
         by_dir = stats["by_direction"]
 
         # Win rate emoji
@@ -2126,16 +2159,38 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         lines = [
             "📊 Performance Dashboard",
             f"{'=' * 28}\n",
-            f"{wr_emoji} Win Rate: {win_rate:.1f}% ({wins}W / {losses}L)",
-            f"{pnl_emoji} Total PnL: {total_pnl:+.1f}%",
-            f"📋 Total Trades: {total}",
-            f"📋 Active Positions: {active}\n",
+            "💼 Account Overview:",
+            f"  💰 Portfolio: ${portfolio:,.2f} USDT",
+            f"  📋 Active Positions: {active_count}",
+            f"  💵 In Trades: ${total_active_invested:,.2f}",
+            f"  🏦 Available: ${available_balance:,.2f}",
+        ]
+
+        if total_active_pnl_usd != 0:
+            pnl_e = "📈" if total_active_pnl_usd >= 0 else "📉"
+            lines.append(f"  {pnl_e} Unrealized PnL: ${total_active_pnl_usd:+,.2f}")
+
+        lines.extend([
+            f"\n📈 Trading Performance:",
+            f"  {wr_emoji} Win Rate: {win_rate:.1f}% ({wins}W / {losses}L)",
+            f"  {pnl_emoji} Total PnL: {total_pnl:+.1f}%",
+            f"  📋 Total Trades: {total}\n",
             "💰 Trade Averages:",
             f"  Avg Win:  {avg_win:+.1f}%",
             f"  Avg Loss: {avg_loss:+.1f}%",
             f"  Avg Leverage: {avg_lev:.0f}x\n",
             f"⚖️ Profit Factor: {pf:.2f} ({pf_rating})",
-        ]
+        ])
+
+        # Active positions breakdown
+        if active_positions:
+            lines.append(f"\n📋 Active Breakdown:")
+            for p in active_positions:
+                emoji = "🟢" if p.pnl_pct >= 0 else "🔴"
+                lines.append(
+                    f"  {emoji} ${p.symbol} ({p.direction}) "
+                    f"${p.size_usd:,.2f} → ${p.pnl_usd:+,.2f} ({p.pnl_pct:+.1f}%)"
+                )
 
         # Best & worst trade
         best = stats["best_trade"]

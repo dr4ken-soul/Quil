@@ -69,10 +69,11 @@ class TrackedPosition:
         self.entry_price = entry_price
         self.current_price = entry_price
         self.stop_loss = stop_loss
+        self.original_stop_loss = stop_loss  # Never modified — used for real SL checks
         self.take_profit_1 = take_profit_1
         self.take_profit_2 = take_profit_2
         self.leverage = leverage
-        self.size_usd = size_usd
+        self.size_usd = size_usd  # This is MARGIN amount (what user risked)
         self.liquidation_price = liquidation_price or self._calc_liquidation_price()
 
         # Alert thresholds
@@ -125,9 +126,10 @@ class TrackedPosition:
 
     @property
     def pnl_usd(self) -> float:
-        """Current PnL in USD."""
+        """Current PnL in USD (margin-based, leverage already in pnl_pct)."""
         if self.size_usd <= 0:
             return 0.0
+        # size_usd = margin (what user risked). pnl_pct includes leverage.
         return self.size_usd * self.pnl_pct / 100
 
     @property
@@ -169,10 +171,10 @@ class TrackedPosition:
                 ))
                 self.fired_alerts.add("TP2")
 
-        # Check Stop Loss
-        if self.stop_loss > 0 and "SL" not in self.fired_alerts:
-            if self._price_hit_sl():
-                triggered.append(self._make_alert(AlertType.SL_HIT, self.stop_loss))
+        # Check Stop Loss — ONLY against the original SL (never moved by trailing)
+        if self.original_stop_loss > 0 and "SL" not in self.fired_alerts:
+            if self._price_hit_original_sl():
+                triggered.append(self._make_alert(AlertType.SL_HIT, self.original_stop_loss))
                 self.fired_alerts.add("SL")
                 self.is_open = False
                 self.close_reason = "Stop Loss Hit"
@@ -255,11 +257,18 @@ class TrackedPosition:
             return self.current_price <= target
 
     def _price_hit_sl(self) -> bool:
-        """Check if stop loss has been hit."""
+        """Check if trailing stop loss has been hit (informational only)."""
         if self.direction == "LONG":
             return self.current_price <= self.stop_loss
         else:
             return self.current_price >= self.stop_loss
+
+    def _price_hit_original_sl(self) -> bool:
+        """Check if ORIGINAL stop loss has been hit (closes position)."""
+        if self.direction == "LONG":
+            return self.current_price <= self.original_stop_loss
+        else:
+            return self.current_price >= self.original_stop_loss
 
     def _price_hit_liquidation(self) -> bool:
         """Check if liquidation price has been hit."""
@@ -479,37 +488,7 @@ class PositionMonitor:
                 if current_price is None or current_price <= 0:
                     continue
 
-                # === TRAILING STOP (matches backtester logic) ===
-                # Track best price and move SL to lock in profits
-                if position.stop_loss > 0 and position.entry_price > 0:
-                    if position.direction.upper() == "LONG":
-                        best = getattr(position, '_best_price', position.entry_price)
-                        if current_price > best:
-                            position._best_price = current_price
-                        best = position._best_price
-                        unrealized = (best - position.entry_price) / position.entry_price * 100
-                        if unrealized >= 5.0:  # Activate trailing at 5% profit
-                            trail_price = position.entry_price * (1 + unrealized * 0.3 / 100)
-                            if trail_price > position.stop_loss:
-                                old_sl = position.stop_loss
-                                position.stop_loss = trail_price
-                                log.info("trailing_stop_moved", symbol=position.symbol,
-                                        direction="LONG", old_sl=old_sl,
-                                        new_sl=trail_price, unrealized=f"{unrealized:.1f}%")
-                    elif position.direction.upper() == "SHORT":
-                        best = getattr(position, '_best_price', position.entry_price)
-                        if current_price < best:
-                            position._best_price = current_price
-                        best = position._best_price
-                        unrealized = (position.entry_price - best) / position.entry_price * 100
-                        if unrealized >= 5.0:  # Activate trailing at 5% profit
-                            trail_price = position.entry_price * (1 - unrealized * 0.3 / 100)
-                            if trail_price < position.stop_loss:
-                                old_sl = position.stop_loss
-                                position.stop_loss = trail_price
-                                log.info("trailing_stop_moved", symbol=position.symbol,
-                                        direction="SHORT", old_sl=old_sl,
-                                        new_sl=trail_price, unrealized=f"{unrealized:.1f}%")
+                # === TRAILING STOP DISABLED ===\n                # Previously, the trailing stop moved position.stop_loss\n                # which caused false 'Stop Loss Hit' alerts on profitable trades.\n                # The original SL set by the signal is now the ONLY SL.\n                # Users can manually adjust SL via /set command if needed.", "StartLine": 491, "TargetContent": "                # === TRAILING STOP (matches backtester logic) ===\n                # Track best price and move SL to lock in profits\n                if position.stop_loss > 0 and position.entry_price > 0:\n                    if position.direction.upper() == \"LONG\":\n                        best = getattr(position, '_best_price', position.entry_price)\n                        if current_price > best:\n                            position._best_price = current_price\n                        best = position._best_price\n                        unrealized = (best - position.entry_price) / position.entry_price * 100\n                        if unrealized >= 5.0:  # Activate trailing at 5% profit\n                            trail_price = position.entry_price * (1 + unrealized * 0.3 / 100)\n                            if trail_price > position.stop_loss:\n                                old_sl = position.stop_loss\n                                position.stop_loss = trail_price\n                                log.info(\"trailing_stop_moved\", symbol=position.symbol,\n                                        direction=\"LONG\", old_sl=old_sl,\n                                        new_sl=trail_price, unrealized=f\"{unrealized:.1f}%\")\n                    elif position.direction.upper() == \"SHORT\":\n                        best = getattr(position, '_best_price', position.entry_price)\n                        if current_price < best:\n                            position._best_price = current_price\n                        best = position._best_price\n                        unrealized = (position.entry_price - best) / position.entry_price * 100\n                        if unrealized >= 5.0:  # Activate trailing at 5% profit\n                            trail_price = position.entry_price * (1 - unrealized * 0.3 / 100)\n                            if trail_price < position.stop_loss:\n                                old_sl = position.stop_loss\n                                position.stop_loss = trail_price\n                                log.info(\"trailing_stop_moved\", symbol=position.symbol,\n                                        direction=\"SHORT\", old_sl=old_sl,\n                                        new_sl=trail_price, unrealized=f\"{unrealized:.1f}%\")
 
                 # Check all alert conditions
                 triggered_alerts = position.check_alerts(current_price)
