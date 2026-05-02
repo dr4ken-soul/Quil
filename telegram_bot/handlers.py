@@ -572,6 +572,32 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:
             await query.edit_message_text("⏰ Trade expired.")
 
+    elif data.startswith("custom_amount:"):
+        confirm_id = data.split(":", 1)[1]
+        await query.edit_message_text(
+            "✏️ Type your custom amount:\n\n"
+            f"`/set amount [your amount] {confirm_id}`\n\n"
+            "Example: `/set amount 75 " + confirm_id + "`\n\n"
+            "This sets the trade to use exactly that $ amount.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data=f"modify_amount:{confirm_id}")]
+            ])
+        )
+
+    elif data.startswith("custom_leverage:"):
+        confirm_id = data.split(":", 1)[1]
+        await query.edit_message_text(
+            "✏️ Type your custom leverage:\n\n"
+            f"`/set leverage [multiplier] {confirm_id}`\n\n"
+            "Example: `/set leverage 7 " + confirm_id + "`\n\n"
+            "Max: 20x. Higher = more risk.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data=f"modify_leverage:{confirm_id}")]
+            ])
+        )
+
     elif data.startswith("back_confirm:"):
         confirm_id = data.split(":", 1)[1]
         await _show_confirmation_screen(query, confirm_id)
@@ -858,13 +884,16 @@ async def _handle_modify_amount(query, confirm_id: str) -> None:
             InlineKeyboardButton("$1000", callback_data=f"set_amount:1000:{confirm_id}"),
         ],
         [
+            InlineKeyboardButton("✏️ Custom Amount", callback_data=f"custom_amount:{confirm_id}"),
+        ],
+        [
             InlineKeyboardButton("🔙 Back", callback_data=f"back_confirm:{confirm_id}"),
         ],
     ])
 
     await query.edit_message_text(
         "💵 Select trade amount (USDT):\n\n"
-        "This overrides the default position sizing.",
+        "Pick a preset or tap Custom to enter your own.",
         reply_markup=buttons
     )
 
@@ -890,12 +919,16 @@ async def _handle_modify_leverage(query, confirm_id: str) -> None:
             InlineKeyboardButton("20x", callback_data=f"set_leverage:20:{confirm_id}"),
         ],
         [
+            InlineKeyboardButton("✏️ Custom Leverage", callback_data=f"custom_leverage:{confirm_id}"),
+        ],
+        [
             InlineKeyboardButton("🔙 Back", callback_data=f"back_confirm:{confirm_id}"),
         ],
     ])
 
     await query.edit_message_text(
         "⚡ Select leverage:\n\n"
+        "Pick a preset or tap Custom to enter your own.\n"
         "⚠️ Higher leverage = higher risk of liquidation.",
         reply_markup=buttons
     )
@@ -909,12 +942,15 @@ async def set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         /set sl 75000 abc12345
         /set tp 80000 abc12345
         /set entry 76000 abc12345
+        /set amount 75 abc12345
+        /set leverage 7 abc12345
     """
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
     if not context.args or len(context.args) < 3:
         await update.message.reply_text(
-            "Usage: /set [sl|tp|entry] [price] [confirm_id]\n"
+            "Usage: /set [param] [value] [confirm_id]\n\n"
+            "Params: sl, tp, entry, amount, leverage\n"
             "Example: /set sl 75000 abc12345"
         )
         return
@@ -925,9 +961,9 @@ async def set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     param = context.args[0].lower()
     try:
-        price = float(context.args[1])
+        value = float(context.args[1])
     except ValueError:
-        await update.message.reply_text("Invalid price. Use a number.")
+        await update.message.reply_text("Invalid value. Use a number.")
         return
 
     confirm_id = context.args[2]
@@ -940,26 +976,39 @@ async def set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     signal = pending["signal"]
 
     if param == "sl":
-        signal.risk.stop_loss = price
+        signal.risk.stop_loss = value
         label = "Stop Loss"
+        display = f"${value:,.6f}" if value < 1 else f"${value:,.2f}"
     elif param == "tp":
-        signal.risk.take_profit_1 = price
+        signal.risk.take_profit_1 = value
         label = "Take Profit 1"
+        display = f"${value:,.6f}" if value < 1 else f"${value:,.2f}"
     elif param == "entry":
-        signal.risk.entry_price = price
+        signal.risk.entry_price = value
         label = "Entry Price"
+        display = f"${value:,.6f}" if value < 1 else f"${value:,.2f}"
+    elif param == "amount":
+        pending["custom_amount"] = value
+        label = "Trade Amount"
+        display = f"${value:,.2f} USDT"
+    elif param in ("leverage", "lev"):
+        lev = min(int(value), 20)
+        signal.risk.leverage = lev
+        label = "Leverage"
+        display = f"{lev}x"
     else:
-        await update.message.reply_text("Unknown parameter. Use: sl, tp, or entry")
+        await update.message.reply_text(
+            "Unknown parameter. Use: sl, tp, entry, amount, or leverage"
+        )
         return
 
-    # Recalculate risk/reward
-    entry = signal.risk.entry_price
-    sl = signal.risk.stop_loss
-    tp1 = signal.risk.take_profit_1
-    if entry > 0 and sl > 0 and abs(entry - sl) > 0:
-        signal.risk.risk_reward = abs(tp1 - entry) / abs(entry - sl)
-
-    price_fmt = f"${price:,.6f}" if price < 1 else f"${price:,.2f}"
+    # Recalculate risk/reward if price params changed
+    if param in ("sl", "tp", "entry"):
+        entry = signal.risk.entry_price
+        sl = signal.risk.stop_loss
+        tp1 = signal.risk.take_profit_1
+        if entry > 0 and sl > 0 and abs(entry - sl) > 0:
+            signal.risk.risk_reward = abs(tp1 - entry) / abs(entry - sl)
 
     # Send confirmation and show a button to go back
     buttons = InlineKeyboardMarkup([
@@ -967,7 +1016,7 @@ async def set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     ])
 
     await update.message.reply_text(
-        f"✅ {label} updated to {price_fmt}\n\n"
+        f"✅ {label} updated to {display}\n\n"
         "Tap below to return to the trade confirmation.",
         reply_markup=buttons
     )
