@@ -179,6 +179,7 @@ class TrackedPosition:
                 self.is_open = False
                 self.close_reason = "Stop Loss Hit"
                 self.closed_at = datetime.now(timezone.utc)
+                return triggered  # Position closed — no more alerts
 
         # Check Liquidation
         if self.liquidation_price > 0 and "LIQUIDATED" not in self.fired_alerts:
@@ -188,6 +189,7 @@ class TrackedPosition:
                 self.is_open = False
                 self.close_reason = "Liquidated"
                 self.closed_at = datetime.now(timezone.utc)
+                return triggered  # Position closed — no more alerts
 
         # Check profit percentage alerts
         current_pnl = self.pnl_pct
@@ -445,7 +447,9 @@ class PositionMonitor:
         log.info("position_monitor_stopped")
 
     async def _load_from_db(self) -> None:
-        """Load open positions from database into memory."""
+        """Load open positions from database into memory.
+        On restart, silently close any positions where SL was already hit.
+        """
         try:
             positions = await get_active_positions()
             for p in positions:
@@ -456,12 +460,45 @@ class PositionMonitor:
                        for pos in self._positions.values()):
                     continue
 
+                direction = p.get("direction", "LONG").upper()
+                entry_price = p.get("entry_price", 0)
+                stop_loss = p.get("stop_loss", 0)
+
+                # Check if this position's SL was already hit before we loaded
+                # (prevents alert floods on redeploy)
+                if stop_loss > 0 and entry_price > 0:
+                    try:
+                        # Quick price check
+                        current = None
+                        if self._data_pipeline:
+                            token = await self._data_pipeline.build_token_profile(symbol)
+                            if token and token.metrics.price > 0:
+                                current = token.metrics.price
+
+                        if current:
+                            sl_hit = False
+                            if direction == "LONG" and current <= stop_loss:
+                                sl_hit = True
+                            elif direction == "SHORT" and current >= stop_loss:
+                                sl_hit = True
+
+                            if sl_hit:
+                                # Close silently in DB — don't send alert
+                                from utils.database import close_position as db_close
+                                await db_close(pos_id, "Stop Loss Hit (detected on restart)")
+                                log.info("position_closed_on_load",
+                                        symbol=symbol, reason="SL already hit")
+                                continue  # Don't load this position
+                    except Exception as check_err:
+                        log.warning("sl_check_on_load_failed",
+                                   symbol=symbol, error=str(check_err))
+
                 position = TrackedPosition(
                     position_id=pos_id,
                     symbol=symbol,
-                    direction=p.get("direction", "LONG").upper(),
-                    entry_price=p.get("entry_price", 0),
-                    stop_loss=p.get("stop_loss", 0),
+                    direction=direction,
+                    entry_price=entry_price,
+                    stop_loss=stop_loss,
                     take_profit_1=p.get("take_profit_1", 0),
                     take_profit_2=p.get("take_profit_2", 0),
                     leverage=p.get("leverage", 1),
