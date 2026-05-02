@@ -85,6 +85,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "/track [ticker] [entry] [sl] [tp] - Track a position for alerts\n"
         "/positions - View all tracked positions\n"
         "/close [ticker] - Stop tracking a position\n"
+        "/movesl [ticker] [price] - Move stop loss on active position\n"
+        "/movetp [ticker] [price] - Move take profit on active position\n"
         "/setalert [ticker] [price] - Set custom price alert\n"
         "/watch [ticker] - Add to monitoring watchlist\n"
         "/watchlist - View active watchlist\n"
@@ -123,6 +125,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "position for alerts. Example: /track ZAMA 0.027 0.025 0.035 5x\n"
         "/positions - View all tracked positions with live PnL.\n"
         "/close [ticker] - Stop tracking a position.\n"
+        "/movesl [ticker] [price] - Move stop loss on active position. "
+        "Use 'breakeven' as price to move SL to entry.\n"
+        "/movetp [ticker] [price] - Move take profit on active position.\n"
         "/setalert [ticker] [price] - Set a custom price alert.\n"
         "\n"
         "Watchlist:\n"
@@ -1019,6 +1024,112 @@ async def set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         f"✅ {label} updated to {display}\n\n"
         "Tap below to return to the trade confirmation.",
         reply_markup=buttons
+    )
+
+
+async def movesl_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Move stop loss on an ACTIVE position.
+
+    Usage: /movesl [ticker] [new_price]
+    Example: /movesl BTC 75000
+    Special: /movesl BTC breakeven  → moves SL to entry price
+    """
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: /movesl [ticker] [new_price]\n"
+            "Example: /movesl BTC 75000\n"
+            "Or: /movesl BTC breakeven"
+        )
+        return
+
+    if not _position_monitor:
+        await update.message.reply_text("Position monitor not available.")
+        return
+
+    ticker = context.args[0].upper().replace("$", "")
+    price_arg = context.args[1].lower()
+
+    # Find the active position
+    position = None
+    for pos in _position_monitor.active_positions:
+        if pos.symbol.upper() == ticker:
+            position = pos
+            break
+
+    if not position:
+        await update.message.reply_text(f"No active position found for ${ticker}.")
+        return
+
+    if price_arg == "breakeven" or price_arg == "be":
+        new_sl = position.entry_price
+    else:
+        try:
+            new_sl = float(price_arg)
+        except ValueError:
+            await update.message.reply_text("Invalid price. Use a number or 'breakeven'.")
+            return
+
+    old_sl = position.stop_loss
+    position.stop_loss = new_sl
+    position.original_stop_loss = new_sl  # Update original too since user chose this
+
+    price_fmt = lambda p: f"${p:,.6f}" if p < 1 else f"${p:,.2f}"
+
+    await update.message.reply_text(
+        f"✅ Stop Loss updated for ${ticker}\n\n"
+        f"Old SL: {price_fmt(old_sl)}\n"
+        f"New SL: {price_fmt(new_sl)}\n\n"
+        f"{'🛡️ SL moved to breakeven!' if price_arg in ('breakeven', 'be') else ''}"
+    )
+
+
+async def movetp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Move take profit on an ACTIVE position.
+
+    Usage: /movetp [ticker] [new_price]
+    Example: /movetp BTC 85000
+    """
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: /movetp [ticker] [new_price]\n"
+            "Example: /movetp BTC 85000"
+        )
+        return
+
+    if not _position_monitor:
+        await update.message.reply_text("Position monitor not available.")
+        return
+
+    ticker = context.args[0].upper().replace("$", "")
+
+    try:
+        new_tp = float(context.args[1])
+    except ValueError:
+        await update.message.reply_text("Invalid price. Use a number.")
+        return
+
+    # Find the active position
+    position = None
+    for pos in _position_monitor.active_positions:
+        if pos.symbol.upper() == ticker:
+            position = pos
+            break
+
+    if not position:
+        await update.message.reply_text(f"No active position found for ${ticker}.")
+        return
+
+    old_tp = position.take_profit_1
+    position.take_profit_1 = new_tp
+
+    price_fmt = lambda p: f"${p:,.6f}" if p < 1 else f"${p:,.2f}"
+
+    await update.message.reply_text(
+        f"✅ Take Profit updated for ${ticker}\n\n"
+        f"Old TP: {price_fmt(old_tp)}\n"
+        f"New TP: {price_fmt(new_tp)}"
     )
 
 
