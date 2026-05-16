@@ -162,14 +162,18 @@ class TrackedPosition:
                 ))
                 self.fired_alerts.add("TP1")
 
-        # Check TP2 (final target — close the position)
+        # Check TP2 (final target — AUTO-CLOSE the position)
         if self.take_profit_2 > 0 and "TP2" not in self.fired_alerts:
             if self._price_crossed(self.take_profit_2):
                 triggered.append(self._make_alert(
                     AlertType.TP2_HIT, self.take_profit_2,
-                    extra="Final take profit hit. Consider closing the remaining position."
+                    extra="Final take profit hit. Position auto-closed."
                 ))
                 self.fired_alerts.add("TP2")
+                self.is_open = False
+                self.close_reason = "Take Profit 2 Hit"
+                self.closed_at = datetime.now(timezone.utc)
+                return triggered  # Position closed — no more alerts
 
         # Check Stop Loss — ONLY against the original SL (never moved by trailing)
         if self.original_stop_loss > 0 and "SL" not in self.fired_alerts:
