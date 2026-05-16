@@ -103,6 +103,30 @@ class CrimePumpDetector:
         triggered_layers = [r for r in valid_results if r.triggered]
         triggered_numbers = [r.layer_number for r in triggered_layers]
 
+        # PRICE MOMENTUM OVERRIDE: Catch obvious pumps even when
+        # derivatives layers don't trigger (no perp data, no OI, etc.)
+        price_24h = token.metrics.price_change_24h
+        mcap = token.metrics.market_cap
+        vol_24h = token.metrics.volume_24h
+        vol_mcap_ratio = (vol_24h / mcap) if mcap > 0 else 0
+
+        momentum_signal = None
+        if price_24h > 50 or vol_mcap_ratio > 1.0:
+            momentum_signal = {
+                "layer": 0,
+                "layer_name": "Price Momentum",
+                "signal": "extreme_momentum",
+                "description": (
+                    f"24h price change: {price_24h:+.1f}%, "
+                    f"Volume/MCap ratio: {vol_mcap_ratio:.2f}"
+                ),
+                "severity": "critical" if price_24h > 100 else "high",
+            }
+            # If no layers triggered but momentum is extreme, force a watch signal
+            if not triggered_layers:
+                log.info("momentum_override", token=token.symbol,
+                        price_24h=price_24h, vol_mcap=vol_mcap_ratio)
+
         # Check degraded state
         evaluable_layers = 4 - len(failed_layers)
         if evaluable_layers < MIN_LAYERS_CONFIRMED:
@@ -139,6 +163,13 @@ class CrimePumpDetector:
                     "layer_name": lr.layer_name,
                     **sig,
                 })
+
+        # Inject momentum signal if detected
+        if momentum_signal:
+            alert.signals_detected.append(momentum_signal)
+            # Ensure the alert is at least a WATCH level
+            if alert.total_layers_triggered == 0:
+                alert.total_layers_triggered = 1
 
         # Compute confidence and recommendation
         alert.compute_confidence()

@@ -102,10 +102,10 @@ class LifecycleTracker:
         If there are not enough shorts they may sell directly to liquidate longs.
         """
         score = 0.0
-        checks = 0
 
         oi_change = token.derivatives.oi_change_1h
         price_change = token.metrics.price_change_1h
+        price_change_24h = token.metrics.price_change_24h
         supply_concentration = token.onchain.top10_wallet_pct
 
         # Rising OI + rising price = long opening (Stage 1 pattern)
@@ -113,6 +113,28 @@ class LifecycleTracker:
             score += 0.3
         elif oi_change > 5 and price_change > 2:
             score += 0.15
+
+        # MULTI-DAY MOMENTUM: 24h price change catches gradual pumps
+        # that individual 1h snapshots miss
+        if price_change_24h > 50:
+            score += 0.35  # Massive 24h move — strong crime pump signal
+        elif price_change_24h > 30:
+            score += 0.25
+        elif price_change_24h > 15:
+            score += 0.15
+
+        # Volume/MarketCap ratio — abnormally high volume vs market cap
+        # is a key sign of coordinated pump activity
+        mcap = token.metrics.market_cap
+        vol_24h = token.metrics.volume_24h
+        if mcap > 0 and vol_24h > 0:
+            vol_mcap_ratio = vol_24h / mcap
+            if vol_mcap_ratio > 1.0:
+                score += 0.25  # Volume exceeds market cap — extreme
+            elif vol_mcap_ratio > 0.5:
+                score += 0.15
+            elif vol_mcap_ratio > 0.2:
+                score += 0.1
 
         # High supply concentration (accumulation complete)
         if supply_concentration > 80:
