@@ -740,7 +740,26 @@ class BacktestEngine:
         prev2_price = prev2_candle["close"]
 
         change_1h = (price - prev_price) / prev_price * 100 if prev_price > 0 else 0
-        change_24h = (price - prev2_price) / prev2_price * 100 if prev2_price > 0 else 0
+
+        # Compute TRUE 24h price change using the candle window
+        # For 1h candles, look back 24 candles; for 4h, look back 6; for daily, look back 1
+        change_24h = 0.0
+        if candle_window and len(candle_window) >= 3:
+            # Estimate candle interval from timestamps
+            if len(candle_window) >= 2:
+                interval_ms = candle_window[-1].get("timestamp", 0) - candle_window[-2].get("timestamp", 0)
+                interval_hours = max(interval_ms / 3600000, 1)  # Convert ms to hours
+                candles_in_24h = int(24 / interval_hours)
+            else:
+                candles_in_24h = 1
+
+            # Look back the right number of candles for a true 24h change
+            lookback_idx = max(0, len(candle_window) - 1 - candles_in_24h)
+            price_24h_ago = candle_window[lookback_idx]["close"]
+            if price_24h_ago > 0:
+                change_24h = (price - price_24h_ago) / price_24h_ago * 100
+        else:
+            change_24h = (price - prev2_price) / prev2_price * 100 if prev2_price > 0 else 0
 
         # Calculate TRUE volatility from candle window (not just 1-2 candle changes)
         # This is critical: IRYS showed 3% volatility with old method but really has 15%+
@@ -762,6 +781,11 @@ class BacktestEngine:
         # Estimate 5m change from intra-candle movement
         change_5m = (price - candle["open"]) / candle["open"] * 100 if candle["open"] > 0 else 0
 
+        # Estimate market cap from volume (rough heuristic for backtests)
+        # Typical vol/mcap ratio is 0.05-0.3 for most tokens
+        vol = candle.get("volume", 0)
+        estimated_mcap = vol * 5 if vol > 0 else 0  # Conservative estimate
+
         token = Token(symbol=symbol)
         token.metrics = TokenMetrics(
             price=price,
@@ -771,8 +795,7 @@ class BacktestEngine:
             volume_1h=candle.get("volume", 0),
             volume_5m=candle.get("volume", 0) / 12,  # Approximate
             volume_24h=candle.get("volume", 0) * 24,  # Approximate
-            market_cap=0,
-            fdv=0,
+            market_cap=estimated_mcap,
             liquidity_usd=0,
         )
         token.derivatives = DerivativesMetrics()
