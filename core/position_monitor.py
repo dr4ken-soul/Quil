@@ -383,6 +383,7 @@ class PositionMonitor:
 
     def remove_position(self, symbol: str, position_id: int = None) -> bool:
         """Remove a position from monitoring."""
+        symbol_upper = symbol.upper()
         key = f"{symbol}_{position_id}" if position_id else None
 
         if key and key in self._positions:
@@ -393,9 +394,9 @@ class PositionMonitor:
             log.info("position_removed", symbol=symbol, id=position_id)
             return True
 
-        # Find by symbol if no ID given
+        # Find by symbol if no ID given (case-insensitive)
         for k, pos in self._positions.items():
-            if pos.symbol == symbol and pos.is_open:
+            if pos.symbol.upper() == symbol_upper and pos.is_open:
                 pos.is_open = False
                 pos.closed_at = datetime.now(timezone.utc)
                 pos.close_reason = "Manually closed"
@@ -406,8 +407,9 @@ class PositionMonitor:
 
     def add_price_alert(self, symbol: str, target_price: float) -> bool:
         """Add a custom price alert to an existing position."""
+        symbol_upper = symbol.upper()
         for pos in self._positions.values():
-            if pos.symbol == symbol and pos.is_open:
+            if pos.symbol.upper() == symbol_upper and pos.is_open:
                 pos.custom_price_alerts.append(target_price)
                 log.info("price_alert_added", symbol=symbol, price=target_price)
                 return True
