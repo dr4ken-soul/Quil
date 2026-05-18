@@ -1933,7 +1933,7 @@ async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     symbol = context.args[0].upper().replace("$", "")
-    removed = _position_monitor.remove_position(symbol)
+    removed = await _position_monitor.remove_position(symbol)
 
     if removed:
         await update.message.reply_text(

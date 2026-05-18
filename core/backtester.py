@@ -563,6 +563,7 @@ class BacktestEngine:
             "NEAR": "near", "FIL": "filecoin", "ATOM": "cosmos",
             "XRP": "ripple", "BNB": "binancecoin",
             "TRUMP": "official-trump", "ZAMA": "zama",
+            "BILL": "billions-network",
         }
 
         coin_id = symbol_map.get(symbol.upper())
@@ -688,6 +689,7 @@ class BacktestEngine:
             url = "https://api.bybit.com/v5/market/kline"
 
             # Try linear (perpetual) first
+            start_time = int((datetime.now(timezone.utc) - timedelta(days=days + 1)).timestamp() * 1000)
             for category in ["linear", "spot"]:
                 async with session.get(
                     url,
@@ -696,8 +698,9 @@ class BacktestEngine:
                         "symbol": bybit_symbol,
                         "interval": interval,
                         "limit": limit,
+                        "start": start_time,
                     },
-                    timeout=aiohttp.ClientTimeout(total=10),
+                    timeout=aiohttp.ClientTimeout(total=15),
                 ) as resp:
                     if resp.status != 200:
                         continue

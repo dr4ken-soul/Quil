@@ -381,8 +381,8 @@ class PositionMonitor:
                 leverage=leverage)
         return position
 
-    def remove_position(self, symbol: str, position_id: int = None) -> bool:
-        """Remove a position from monitoring."""
+    async def remove_position(self, symbol: str, position_id: int = None) -> bool:
+        """Remove a position from monitoring and close in database."""
         symbol_upper = symbol.upper()
         key = f"{symbol}_{position_id}" if position_id else None
 
@@ -391,6 +391,11 @@ class PositionMonitor:
             pos.is_open = False
             pos.closed_at = datetime.now(timezone.utc)
             pos.close_reason = "Manually closed"
+            # Persist to database
+            try:
+                await close_position(pos.position_id, "Manually closed")
+            except Exception as e:
+                log.warning("db_close_failed", error=str(e))
             log.info("position_removed", symbol=symbol, id=position_id)
             return True
 
@@ -400,6 +405,11 @@ class PositionMonitor:
                 pos.is_open = False
                 pos.closed_at = datetime.now(timezone.utc)
                 pos.close_reason = "Manually closed"
+                # Persist to database
+                try:
+                    await close_position(pos.position_id, "Manually closed")
+                except Exception as e:
+                    log.warning("db_close_failed", error=str(e))
                 log.info("position_removed", symbol=symbol)
                 return True
 
