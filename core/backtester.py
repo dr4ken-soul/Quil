@@ -537,49 +537,39 @@ class BacktestEngine:
     async def _fetch_historical_candles(self, symbol: str, days: int) -> list[dict]:
         """
         Fetch historical OHLCV data.
-        Priority: Bybit kline API → CoinGecko (with dynamic search).
+        Priority: Bybit kline API → CoinGecko (dynamic search, no hardcoding).
         Returns list of candle dicts with timestamp, open, high, low, close, volume.
         """
         import aiohttp
         session = await self._get_session()
 
-        # Try Bybit first (most accurate, no hardcoded mapping needed)
+        # Try Bybit first (most accurate, public API, no key needed)
         bybit_candles = await self._fetch_bybit_historical(symbol, days, session)
         if bybit_candles and len(bybit_candles) >= 5:
             return bybit_candles
 
-        # Map common symbols to CoinGecko IDs
-        symbol_map = {
-            "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
-            "DOGE": "dogecoin", "PEPE": "pepe", "WIF": "dogwifcoin",
-            "BONK": "bonk", "RAVE": "ravedao", "STO": "stormx",
-            "ORDI": "ordinals", "IP": "story-protocol",
-            "AVAX": "avalanche-2", "LINK": "chainlink",
-            "ADA": "cardano", "DOT": "polkadot", "MATIC": "matic-network",
-            "ARB": "arbitrum", "OP": "optimism", "SUI": "sui",
-            "APT": "aptos", "SEI": "sei-network", "INJ": "injective-protocol",
-            "TIA": "celestia", "JUP": "jupiter-exchange-solana",
-            "RENDER": "render-token", "FET": "fetch-ai",
-            "NEAR": "near", "FIL": "filecoin", "ATOM": "cosmos",
-            "XRP": "ripple", "BNB": "binancecoin",
-            "TRUMP": "official-trump", "ZAMA": "zama",
-            "BILL": "billions-network",
-        }
-
-        coin_id = symbol_map.get(symbol.upper())
-
-        # If not in map, search CoinGecko dynamically
-        if not coin_id:
-            coin_id = await self._resolve_coingecko_id(symbol, session)
+        # Fallback: CoinGecko (dynamic search — no hardcoded map)
+        coin_id = await self._resolve_coingecko_id(symbol, session)
 
         if not coin_id:
-            coin_id = symbol.lower()  # Last resort
+            log.warning("coingecko_id_not_found", symbol=symbol)
+            return []
+
+        # Build headers with API key if available
+        from config.settings import COINGECKO_API_KEY
+        headers = {}
+        params_extra = {}
+        if COINGECKO_API_KEY:
+            headers["x-cg-demo-api-key"] = COINGECKO_API_KEY
+            params_extra["x_cg_demo_api_key"] = COINGECKO_API_KEY
 
         try:
+            # Try OHLC endpoint first (best for backtesting)
             url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
-            params = {"vs_currency": "usd", "days": str(min(days, 365))}
+            params = {"vs_currency": "usd", "days": str(min(days, 365)), **params_extra}
 
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with session.get(url, params=params, headers=headers,
+                                   timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     candles = []
@@ -594,15 +584,18 @@ class BacktestEngine:
                                 "volume": 0,
                             })
                     if candles:
+                        log.info("coingecko_ohlc_fetched", coin=coin_id, candles=len(candles))
                         return candles
                 else:
-                    log.warning("coingecko_ohlc_failed", status=resp.status, coin=coin_id)
+                    log.warning("coingecko_ohlc_failed", status=resp.status,
+                               coin=coin_id, reason=await resp.text())
 
-            # Fallback: try market_chart for price data
+            # Fallback: market_chart endpoint (has volume data)
             url2 = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
-            params2 = {"vs_currency": "usd", "days": str(min(days, 365))}
+            params2 = {"vs_currency": "usd", "days": str(min(days, 365)), **params_extra}
 
-            async with session.get(url2, params=params2, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with session.get(url2, params=params2, headers=headers,
+                                   timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     prices = data.get("prices", [])
@@ -619,7 +612,12 @@ class BacktestEngine:
                             "close": price,
                             "volume": vol,
                         })
+                    if candles:
+                        log.info("coingecko_chart_fetched", coin=coin_id, candles=len(candles))
                     return candles
+                else:
+                    log.warning("coingecko_chart_failed", status=resp.status,
+                               coin=coin_id, reason=await resp.text())
 
         except Exception as e:
             log.error("historical_fetch_error", error=str(e), symbol=symbol)
@@ -627,33 +625,52 @@ class BacktestEngine:
         return []
 
     async def _resolve_coingecko_id(self, symbol: str, session) -> str:
-        """Dynamically search CoinGecko to find the correct coin ID for a symbol."""
+        """
+        Dynamically search CoinGecko to find the correct coin ID for any symbol.
+        Uses the /search endpoint — works for ALL coins, no hardcoding needed.
+        """
         import aiohttp
+        from config.settings import COINGECKO_API_KEY
+
         ticker = symbol.upper().replace("$", "")
+
+        headers = {}
+        params_extra = {}
+        if COINGECKO_API_KEY:
+            headers["x-cg-demo-api-key"] = COINGECKO_API_KEY
+            params_extra["x_cg_demo_api_key"] = COINGECKO_API_KEY
 
         try:
             search_url = "https://api.coingecko.com/api/v3/search"
             async with session.get(
                 search_url,
-                params={"query": ticker},
-                timeout=aiohttp.ClientTimeout(total=8),
+                params={"query": ticker, **params_extra},
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 if resp.status != 200:
+                    log.warning("coingecko_search_failed", symbol=ticker,
+                               status=resp.status, reason=await resp.text())
                     return None
                 data = await resp.json()
 
             coins = data.get("coins", [])
+
+            # Exact symbol match first
             for coin in coins:
                 if coin.get("symbol", "").upper() == ticker:
                     coin_id = coin.get("id")
                     log.info("coingecko_id_resolved", symbol=ticker, coin_id=coin_id)
                     return coin_id
 
+            # Fallback: first result
             if coins:
-                return coins[0].get("id")
+                coin_id = coins[0].get("id")
+                log.info("coingecko_id_fuzzy", symbol=ticker, coin_id=coin_id)
+                return coin_id
 
         except Exception as e:
-            log.warning("coingecko_search_failed", symbol=ticker, error=str(e))
+            log.warning("coingecko_search_error", symbol=ticker, error=str(e))
 
         return None
 
