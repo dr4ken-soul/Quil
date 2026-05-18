@@ -232,12 +232,13 @@ class DataPipeline:
             return None
 
         try:
+            from utils.coingecko import get_headers, get_params, search_url as cg_search_url
             async with aiohttp.ClientSession() as session:
                 # Step 1: Search CoinGecko for the token by symbol
-                search_url = "https://api.coingecko.com/api/v3/search"
                 async with session.get(
-                    search_url,
-                    params={"query": ticker},
+                    cg_search_url(),
+                    params=get_params(query=ticker),
+                    headers=get_headers(),
                     timeout=aiohttp.ClientTimeout(total=8),
                 ) as resp:
                     if resp.status != 200:
@@ -265,10 +266,11 @@ class DataPipeline:
                     return None
 
                 # Step 3: Get the price
-                price_url = "https://api.coingecko.com/api/v3/simple/price"
+                from utils.coingecko import price_url as cg_price_url
                 async with session.get(
-                    price_url,
-                    params={"ids": coin_id, "vs_currencies": "usd"},
+                    cg_price_url(),
+                    params=get_params(ids=coin_id, vs_currencies="usd"),
+                    headers=get_headers(),
                     timeout=aiohttp.ClientTimeout(total=8),
                 ) as resp:
                     if resp.status == 200:
@@ -393,12 +395,13 @@ class DataPipeline:
         result = {}
 
         try:
+            from utils.coingecko import get_headers, get_params, search_url as cg_search_url
             async with aiohttp.ClientSession() as session:
                 # Step 1: Resolve CoinGecko coin ID
-                search_url = "https://api.coingecko.com/api/v3/search"
                 async with session.get(
-                    search_url,
-                    params={"query": ticker},
+                    cg_search_url(),
+                    params=get_params(query=ticker),
+                    headers=get_headers(),
                     timeout=aiohttp.ClientTimeout(total=8),
                 ) as resp:
                     if resp.status != 200:
@@ -427,10 +430,11 @@ class DataPipeline:
                 }
 
                 for tf_name, params in ohlc_map.items():
-                    ohlc_url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
+                    from utils.coingecko import ohlc_url as cg_ohlc_url
                     async with session.get(
-                        ohlc_url,
-                        params={"vs_currency": "usd", "days": params["days"]},
+                        cg_ohlc_url(coin_id),
+                        params=get_params(vs_currency="usd", days=params["days"]),
+                        headers=get_headers(),
                         timeout=aiohttp.ClientTimeout(total=10),
                     ) as resp:
                         if resp.status != 200:

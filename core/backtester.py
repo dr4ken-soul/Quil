@@ -555,18 +555,14 @@ class BacktestEngine:
             log.warning("coingecko_id_not_found", symbol=symbol)
             return []
 
-        # Build headers with API key if available
-        from config.settings import COINGECKO_API_KEY
-        headers = {}
-        params_extra = {}
-        if COINGECKO_API_KEY:
-            headers["x-cg-demo-api-key"] = COINGECKO_API_KEY
-            params_extra["x_cg_demo_api_key"] = COINGECKO_API_KEY
+        # Build headers/params with API key
+        from utils.coingecko import get_headers, get_params
+        headers = get_headers()
 
         try:
             # Try OHLC endpoint first (best for backtesting)
             url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
-            params = {"vs_currency": "usd", "days": str(min(days, 365)), **params_extra}
+            params = get_params(vs_currency="usd", days=str(min(days, 365)))
 
             async with session.get(url, params=params, headers=headers,
                                    timeout=aiohttp.ClientTimeout(total=15)) as resp:
@@ -592,7 +588,7 @@ class BacktestEngine:
 
             # Fallback: market_chart endpoint (has volume data)
             url2 = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
-            params2 = {"vs_currency": "usd", "days": str(min(days, 365)), **params_extra}
+            params2 = get_params(vs_currency="usd", days=str(min(days, 365)))
 
             async with session.get(url2, params=params2, headers=headers,
                                    timeout=aiohttp.ClientTimeout(total=15)) as resp:
@@ -629,22 +625,16 @@ class BacktestEngine:
         Dynamically search CoinGecko to find the correct coin ID for any symbol.
         Uses the /search endpoint — works for ALL coins, no hardcoding needed.
         """
-        import aiohttp
-        from config.settings import COINGECKO_API_KEY
+        from utils.coingecko import get_headers, get_params
 
         ticker = symbol.upper().replace("$", "")
-
-        headers = {}
-        params_extra = {}
-        if COINGECKO_API_KEY:
-            headers["x-cg-demo-api-key"] = COINGECKO_API_KEY
-            params_extra["x_cg_demo_api_key"] = COINGECKO_API_KEY
+        headers = get_headers()
 
         try:
             search_url = "https://api.coingecko.com/api/v3/search"
             async with session.get(
                 search_url,
-                params={"query": ticker, **params_extra},
+                params=get_params(query=ticker),
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
