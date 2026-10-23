@@ -16,6 +16,7 @@ class DetectionLayerResult(BaseModel):
     layer_number: int
     layer_name: str
     triggered: bool = False
+    evaluable: bool = True
     score: float = 0.0
     signals: list[dict] = Field(default_factory=list)
     reasoning: str = ""
@@ -36,6 +37,7 @@ class CrimePumpAlert(BaseModel):
     layer_results: list[DetectionLayerResult] = Field(default_factory=list)
     layers_triggered: list[int] = Field(default_factory=list)
     total_layers_triggered: int = 0
+    required_layers: int = 2
 
     # Signals summary
     signals_detected: list[dict] = Field(default_factory=list)
@@ -62,12 +64,16 @@ class CrimePumpAlert(BaseModel):
 
     @property
     def is_confirmed(self) -> bool:
-        """A crime pump is confirmed only when 2+ layers trigger."""
-        return self.total_layers_triggered >= 2
+        """Require two triggered layers and at least two evaluable layers."""
+        evaluable = sum(1 for result in self.layer_results if result.evaluable)
+        return (
+            self.total_layers_triggered >= self.required_layers
+            and evaluable >= self.required_layers
+        )
 
     def compute_confidence(self) -> None:
         """Set confidence based on how many layers triggered."""
-        n = self.total_layers_triggered
+        n = self.total_layers_triggered if self.is_confirmed else 0
         if n >= 4:
             self.confidence_level = ConfidenceLevel.CRITICAL
         elif n >= 3:

@@ -51,6 +51,7 @@ class FundingRateAnalyzer:
         result = DetectionLayerResult(
             layer_number=self.layer_number,
             layer_name=self.layer_name,
+            evaluable=bool(funding_data) or token.derivatives.funding_rate_available,
         )
 
         signals = []

@@ -107,3 +107,30 @@ class OctoBotAdapter:
             "average_entry": round(avg_entry, 8),
             "source": "quil_builtin",
         }
+
+    async def analyze(self, token) -> Optional[dict]:
+        """Generate a small grid/DCA context suggestion for Quil analysis."""
+        price = float(token.metrics.price or 0)
+        if price <= 0:
+            return None
+
+        volatility = max(
+            abs(float(token.metrics.price_change_1h or 0)),
+            abs(float(token.metrics.price_change_24h or 0)) / 4,
+        )
+        if volatility > 12:
+            return None
+
+        grid = await self.generate_grid_parameters(token.symbol, price, max(volatility, 1.0))
+        if not grid.get("available"):
+            return None
+        return {
+            "strategy": "volatility grid context",
+            "observation": (
+                f"A {grid['grid_range_pct']:.1f}% volatility grid spans "
+                f"${grid['lower_bound']:.6g} to ${grid['upper_bound']:.6g} "
+                f"across {grid['levels']} levels."
+            ),
+            "significance": "This is a non-directional planning aid; it does not change the trade side.",
+            "weight": 0.2,
+        }

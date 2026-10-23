@@ -51,6 +51,13 @@ class OrderBookManipulationAnalyzer:
         result = DetectionLayerResult(
             layer_number=self.layer_number,
             layer_name=self.layer_name,
+            evaluable=(
+                bool(order_book_data or token.order_book_data)
+                or token.derivatives.liquidation_data_available
+                or token.derivatives.liquidation_heatmap_available
+                or len(token.exchange_presence.exchange_price_spread) >= 2
+                or token.metrics.volume_24h > 0
+            ),
         )
 
         signals = []
@@ -287,19 +294,19 @@ class OrderBookManipulationAnalyzer:
             hourly_avg = metrics.volume_24h / 24
             vol_spike = metrics.volume_1h > hourly_avg * 3
 
-        social_quiet = (social.twitter_mentions_1h < 10 and
-                       social.telegram_mentions_1h < 5)
+        # Only treat low social activity as evidence when X data was actually
+        # fetched. Quil has no Telegram search provider, so zero there is
+        # unknown rather than proof of silence.
+        social_quiet = social.twitter_available and social.twitter_mentions_1h < 10
 
         if vol_spike and social_quiet:
             return 1.0, {
                 "name": "Volume Spike Without News Catalyst",
-                "observation": f"Volume spiked significantly with minimal social activity "
-                             f"(Twitter mentions: {social.twitter_mentions_1h}, "
-                             f"Telegram: {social.telegram_mentions_1h})",
-                "significance": "Sudden volume increase with no public news or social media "
-                              "catalyst is a strong manipulation indicator. Organic price "
-                              "discovery is accompanied by discussion. Silent volume spikes "
-                              "suggest coordinated insider activity.",
+                "observation": f"Volume spiked while X activity was low "
+                             f"({social.twitter_mentions_1h} mentions in 1h)",
+                "significance": "A volume spike with little measured X activity may indicate "
+                              "coordinated trading. Social coverage is incomplete, so this "
+                              "signal should be considered with other evidence.",
             }
         return 0, None
 
@@ -309,6 +316,7 @@ class OrderBookManipulationAnalyzer:
         Check for one-sided liquidity provision where sell-side depth
         has been pulled while buy-side remains.
         """
+        order_book_data = order_book_data or token.order_book_data
         if not order_book_data:
             return 0, None
 
@@ -319,8 +327,8 @@ class OrderBookManipulationAnalyzer:
             return 0, None
 
         # Sum top 10 levels each side
-        bid_depth = sum(float(b[1]) for b in bids[:10]) if len(bids) >= 10 else 0
-        ask_depth = sum(float(a[1]) for a in asks[:10]) if len(asks) >= 10 else 0
+        bid_depth = sum(float(b[0]) * float(b[1]) for b in bids[:10])
+        ask_depth = sum(float(a[0]) * float(a[1]) for a in asks[:10])
 
         if bid_depth > 0 and ask_depth > 0:
             imbalance = bid_depth / ask_depth

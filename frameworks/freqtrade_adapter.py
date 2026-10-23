@@ -59,7 +59,20 @@ class FreqtradeAdapter:
             if ohlcv_data is None or len(ohlcv_data) < 20:
                 return {"available": False}
 
-            df = ohlcv_data if isinstance(ohlcv_data, pd.DataFrame) else pd.DataFrame(ohlcv_data)
+            if isinstance(ohlcv_data, pd.DataFrame):
+                df = ohlcv_data.copy()
+            else:
+                rows = list(ohlcv_data)
+                if rows and isinstance(rows[0], dict):
+                    df = pd.DataFrame(rows)
+                else:
+                    columns = ["timestamp", "open", "high", "low", "close", "volume"]
+                    df = pd.DataFrame(rows, columns=columns[:len(rows[0])] if rows else columns)
+            df.columns = [str(column).lower() for column in df.columns]
+            if "close" not in df.columns:
+                return {"available": False, "error": "OHLCV data has no close column"}
+            df["close"] = pd.to_numeric(df["close"], errors="coerce")
+            df = df.dropna(subset=["close"])
 
             indicators = {}
 

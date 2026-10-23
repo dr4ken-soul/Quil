@@ -135,18 +135,19 @@ DEXSCREENER_BASE_URL = "https://api.dexscreener.com"
 DEXSCREENER_RATE_LIMIT = 300               # Requests per minute
 
 # ── Coinglass ────────────────────────────────────────────────────────────────
-COINGLASS_BASE_URL = "https://open-api-v3.coinglass.com/api"
+COINGLASS_BASE_URL = "https://open-api-v4.coinglass.com"
 
 # ── Supported Chains ─────────────────────────────────────────────────────────
 SUPPORTED_CHAINS = {
     "ethereum": {
-        "explorer_url": "https://api.etherscan.io/api",
+        "explorer_url": "https://api.etherscan.io/v2/api",
         "api_key_env": "ETHERSCAN_API_KEY",
         "chain_id": 1,
     },
     "bsc": {
-        "explorer_url": "https://api.bscscan.com/api",
-        "api_key_env": "BSCSCAN_API_KEY",
+        "explorer_url": "https://api.etherscan.io/v2/api",
+        "api_key_env": "ETHERSCAN_API_KEY",
+        "legacy_api_key_env": "BSCSCAN_API_KEY",
         "chain_id": 56,
     },
     "solana": {

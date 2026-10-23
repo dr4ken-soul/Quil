@@ -54,6 +54,12 @@ class PerpManipulationAnalyzer:
         result = DetectionLayerResult(
             layer_number=self.layer_number,
             layer_name=self.layer_name,
+            evaluable=(
+                token.metrics.price > 0
+                or token.metrics.market_cap > 0
+                or token.metrics.volume_24h > 0
+                or token.derivatives.open_interest_available
+            ),
         )
 
         signals = []
@@ -159,16 +165,28 @@ class PerpManipulationAnalyzer:
         stays unchanged this indicates hedged positions created by market makers.
         In that case falling OI does not mean price will fall.
         """
-        oi_change = token.derivatives.oi_change_1h
-        ls_change = token.derivatives.long_short_ratio_change_1h
+        oi_change = token.derivatives.oi_change_4h
+        ls_change = token.derivatives.long_short_ratio_change_4h
         ls_ratio = token.derivatives.long_short_ratio
 
         # Significant OI change with flat long/short ratio = hedged positions
-        if abs(oi_change) > 10 and abs(ls_change) < 2:
+        top_trader_change = token.derivatives.top_trader_long_short_ratio_change_4h
+        top_traders_stable = (
+            not token.derivatives.top_trader_ratio_history_available
+            or abs(top_trader_change) < 2
+        )
+        if (token.derivatives.oi_history_available
+                and token.derivatives.long_short_ratio_history_available
+                and abs(oi_change) > 10 and abs(ls_change) < 2
+                and top_traders_stable):
+            top_trader_note = (
+                f" Top-trader ratio moved {top_trader_change:+.1f}%"
+                if token.derivatives.top_trader_ratio_history_available else ""
+            )
             return 1.0, {
                 "name": "Hedged OI Detected (Fake OI)",
-                "observation": f"OI changed {oi_change:+.1f}% but long/short ratio moved only "
-                             f"{ls_change:+.1f}% (current L/S: {ls_ratio:.2f})",
+                "observation": f"OI changed {oi_change:+.1f}% over 4h but long/short ratio moved only "
+                             f"{ls_change:+.1f}% (current L/S: {ls_ratio:.2f}).{top_trader_note}",
                 "significance": "OI is being inflated through market maker hedging. The stable "
                               "long/short ratio despite significant OI movement indicates positions "
                               "offset against each other. Falling OI in this context does not "
@@ -238,24 +256,32 @@ class PerpManipulationAnalyzer:
         Check for thin order books with few sell orders between current price
         and significantly higher levels.
         """
-        # This requires real-time order book data. We flag based on
-        # liquidity-to-mcap proxy for now, with order book data enhancement planned.
+        book = token.order_book_data
+        bids = book.get("bids", []) if book else []
+        asks = book.get("asks", []) if book else []
+        price = token.metrics.price
         mcap = token.metrics.market_cap
-        liq = token.metrics.liquidity_usd
-
-        if mcap <= 0 or liq <= 0:
+        if not asks or price <= 0 or mcap <= 0:
             return 0, None
 
-        depth_ratio = liq / mcap
+        # Measure ask-side quote depth within 2% above market price. DEX
+        # liquidity-to-market-cap is not an order-book measurement.
+        ask_depth = sum(
+            float(level[0]) * float(level[1])
+            for level in asks
+            if len(level) >= 2 and price <= float(level[0]) <= price * 1.02
+        )
+        if ask_depth <= 0:
+            return 0, None
+        depth_ratio = ask_depth / mcap
 
         if depth_ratio < ORDER_BOOK_THIN_THRESHOLD:
             return 1.0, {
-                "name": "Thin Order Book",
-                "observation": f"Market depth is approximately {depth_ratio * 100:.2f}% "
-                             f"of market cap",
-                "significance": "Very few sell orders between current price and higher "
-                              "levels. Market makers can pull liquidity from the order book "
-                              "to reduce sell-side resistance and move price with smaller capital.",
+                "name": "Thin Ask-Side Order Book",
+                "observation": f"Ask depth within 2% of price is ${ask_depth:,.0f} "
+                             f"({depth_ratio * 100:.2f}% of market cap)",
+                "significance": "Measured sell-side depth is unusually small relative to "
+                              "market capitalization, leaving less visible resistance to upward moves.",
             }
         return 0, None
 

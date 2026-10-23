@@ -602,6 +602,27 @@ async def get_active_watchlist() -> list[dict]:
             return [dict(row) for row in rows]
 
 
+async def update_watchlist_last_scanned(token_symbol: str) -> None:
+    """Record an autonomous scan attempt for every active watchlist entry."""
+    scanned_at = datetime.utcnow()
+    if USE_POSTGRES:
+        pool = await _get_pg_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE token_watchlist SET last_scanned = $1 "
+                "WHERE active = 1 AND UPPER(token_symbol) = UPPER($2)",
+                scanned_at, token_symbol,
+            )
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE token_watchlist SET last_scanned = ? "
+                "WHERE active = 1 AND UPPER(token_symbol) = UPPER(?)",
+                (scanned_at.isoformat(), token_symbol),
+            )
+            await db.commit()
+
+
 async def save_position(position_data: dict) -> int:
     """Save a tracked position and return its ID."""
     if USE_POSTGRES:

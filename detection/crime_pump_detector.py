@@ -59,7 +59,8 @@ class CrimePumpDetector:
                           funding_data: list = None,
                           order_book_data: dict = None,
                           liquidation_data: list = None,
-                          is_refresh: bool = False) -> CrimePumpAlert:
+                          is_refresh: bool = False,
+                          persist: bool = True) -> CrimePumpAlert:
         """
         Run the full crime pump detection pipeline on a single token.
 
@@ -68,6 +69,7 @@ class CrimePumpDetector:
         """
         log.info("scanning_token", token=token.symbol,
                 contract=token.contract_address, refresh=is_refresh)
+        order_book_data = order_book_data or token.order_book_data
 
         # Run all four detection layers in parallel
         layer_results = await asyncio.gather(
@@ -93,6 +95,7 @@ class CrimePumpDetector:
                     layer_number=i + 1,
                     layer_name=layer_name,
                     triggered=False,
+                    evaluable=False,
                     score=0,
                     reasoning=f"Layer {i + 1} analysis failed: {str(result)}",
                 ))
@@ -128,7 +131,7 @@ class CrimePumpDetector:
                         price_24h=price_24h, vol_mcap=vol_mcap_ratio)
 
         # Check degraded state
-        evaluable_layers = 4 - len(failed_layers)
+        evaluable_layers = sum(1 for result in valid_results if result.evaluable)
         if evaluable_layers < MIN_LAYERS_CONFIRMED:
             log.warning("degraded_scan", token=token.symbol,
                        failed=failed_layers, evaluable=evaluable_layers)
@@ -144,13 +147,14 @@ class CrimePumpDetector:
             layer_results=valid_results,
             layers_triggered=triggered_numbers,
             total_layers_triggered=len(triggered_layers),
+            required_layers=MIN_LAYERS_CONFIRMED,
             crime_stage=lifecycle_result["stage"],
             price=token.metrics.price,
             market_cap=token.metrics.market_cap,
             liquidity=token.metrics.liquidity_usd,
             oi_to_mcap_ratio=token.derivatives.oi_to_mcap_ratio,
             funding_rate=token.derivatives.funding_rate,
-            top10_wallet_concentration=token.onchain.top10_wallet_pct,
+            top10_wallet_concentration=token.onchain.top10_wallet_pct or 0.0,
             primary_exchange=token.exchange_presence.primary_spot_exchange,
             is_refresh=is_refresh,
         )
@@ -181,7 +185,7 @@ class CrimePumpDetector:
         )
 
         # Handle refresh comparison
-        if is_refresh:
+        if is_refresh and persist:
             previous = await get_latest_alert(token.symbol)
             if previous:
                 alert.previous_alert_id = previous.get("id")
@@ -209,26 +213,27 @@ class CrimePumpDetector:
             "full_reasoning": alert.full_reasoning,
         }
 
-        try:
-            alert.scan_id = await save_crime_pump_alert(alert_data)
-        except Exception as e:
-            log.error("alert_save_failed", error=str(e))
+        if persist:
+            try:
+                alert.scan_id = await save_crime_pump_alert(alert_data)
+            except Exception as e:
+                log.error("alert_save_failed", error=str(e))
 
-        # Save scan result
-        try:
-            await save_scan_result({
-                "token_symbol": token.symbol,
-                "contract_address": token.contract_address,
-                "chain": alert.chain,
-                "scan_type": "crime_pump",
-                "layer1_score": valid_results[0].score if len(valid_results) > 0 else 0,
-                "layer2_score": valid_results[1].score if len(valid_results) > 1 else 0,
-                "layer3_score": valid_results[2].score if len(valid_results) > 2 else 0,
-                "layer4_score": valid_results[3].score if len(valid_results) > 3 else 0,
-                "total_score": sum(r.score for r in valid_results) / len(valid_results) if valid_results else 0,
-            })
-        except Exception as e:
-            log.error("scan_save_failed", error=str(e))
+            # Save scan result
+            try:
+                await save_scan_result({
+                    "token_symbol": token.symbol,
+                    "contract_address": token.contract_address,
+                    "chain": alert.chain,
+                    "scan_type": "crime_pump",
+                    "layer1_score": valid_results[0].score if len(valid_results) > 0 else 0,
+                    "layer2_score": valid_results[1].score if len(valid_results) > 1 else 0,
+                    "layer3_score": valid_results[2].score if len(valid_results) > 2 else 0,
+                    "layer4_score": valid_results[3].score if len(valid_results) > 3 else 0,
+                    "total_score": sum(r.score for r in valid_results) / len(valid_results) if valid_results else 0,
+                })
+            except Exception as e:
+                log.error("scan_save_failed", error=str(e))
 
         log.info("scan_complete", token=token.symbol,
                 confidence=alert.confidence_level.value,
@@ -279,21 +284,25 @@ class CrimePumpDetector:
             parts.append(f"Crime pump detection CONFIRMED for {alert.token_symbol} "
                         f"with {alert.confidence_level.value} confidence. "
                         f"{alert.total_layers_triggered} of 4 detection layers triggered.")
-        elif alert.total_layers_triggered == 1:
-            parts.append(f"Single detection layer triggered for {alert.token_symbol}. "
-                        f"This is a WATCH alert, not a confirmed detection. "
-                        f"The token should be monitored for escalation across "
+        elif alert.total_layers_triggered > 0:
+            evaluable = sum(1 for result in layer_results if result.evaluable)
+            parts.append(f"Detection signals were found for {alert.token_symbol}, but only "
+                        f"{evaluable} of 4 layers had sufficient data. This is a WATCH "
+                        f"alert, not a confirmed detection. Monitor for agreement across "
                         f"additional layers.")
         else:
+            evaluable = sum(1 for result in layer_results if result.evaluable)
             parts.append(f"No detection layers triggered for {alert.token_symbol}. "
-                        f"All four layers were evaluated and no crime pump signals "
-                        f"were found at this time.")
+                        f"{evaluable} of 4 layers had sufficient data to evaluate.")
 
         # Layer-by-layer summary
         for lr in layer_results:
             if lr.triggered:
                 parts.append(f"Layer {lr.layer_number} ({lr.layer_name}): TRIGGERED "
                            f"(score: {lr.score:.2f}). {lr.reasoning}")
+            elif not lr.evaluable:
+                parts.append(f"Layer {lr.layer_number} ({lr.layer_name}): Not evaluated "
+                           "because required data was unavailable.")
             else:
                 parts.append(f"Layer {lr.layer_number} ({lr.layer_name}): Clear "
                            f"(score: {lr.score:.2f}).")

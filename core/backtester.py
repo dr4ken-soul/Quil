@@ -725,6 +725,7 @@ class BacktestEngine:
                                 "low": float(k[3]),
                                 "close": float(k[4]),
                                 "volume": float(k[5]),
+                                "turnover": float(k[6]) if len(k) > 6 else 0.0,
                             })
 
                         log.info("bybit_historical_fetched", symbol=ticker,
@@ -738,7 +739,8 @@ class BacktestEngine:
 
     def _candle_to_token(self, symbol: str, candle: dict,
                           prev_candle: dict, prev2_candle: dict,
-                          candle_window: list = None) -> Token:
+                          candle_window: list = None,
+                          estimate_market_cap: bool = True) -> Token:
         """
         Build a simulated Token object from candle data so the
         signal aggregator can analyze it the same way it does live data.
@@ -749,7 +751,13 @@ class BacktestEngine:
         prev_price = prev_candle["close"]
         prev2_price = prev2_candle["close"]
 
-        change_1h = (price - prev_price) / prev_price * 100 if prev_price > 0 else 0
+        interval_ms = (
+            candle.get("timestamp", 0) - prev_candle.get("timestamp", 0)
+            if candle.get("timestamp") and prev_candle.get("timestamp") else 0
+        )
+        interval_hours = max(interval_ms / 3_600_000, 1.0)
+        candle_return = price / prev_price if prev_price > 0 else 1.0
+        change_1h = (candle_return ** (1 / interval_hours) - 1) * 100
 
         # Compute TRUE 24h price change using the candle window
         # For 1h candles, look back 24 candles; for 4h, look back 6; for daily, look back 1
@@ -757,9 +765,9 @@ class BacktestEngine:
         if candle_window and len(candle_window) >= 3:
             # Estimate candle interval from timestamps
             if len(candle_window) >= 2:
-                interval_ms = candle_window[-1].get("timestamp", 0) - candle_window[-2].get("timestamp", 0)
-                interval_hours = max(interval_ms / 3600000, 1)  # Convert ms to hours
-                candles_in_24h = int(24 / interval_hours)
+                window_interval_ms = candle_window[-1].get("timestamp", 0) - candle_window[-2].get("timestamp", 0)
+                window_interval_hours = max(window_interval_ms / 3_600_000, 1)
+                candles_in_24h = int(24 / window_interval_hours)
             else:
                 candles_in_24h = 1
 
@@ -788,13 +796,30 @@ class BacktestEngine:
                 max_return = max(returns)
                 true_volatility = max(avg_return * 2.5, max_return)
 
-        # Estimate 5m change from intra-candle movement
-        change_5m = (price - candle["open"]) / candle["open"] * 100 if candle["open"] > 0 else 0
+        # Normalize candle movement to an approximate hourly and five-minute
+        # rate so 4h and daily candles are not mislabeled as 1h/5m changes.
+        candle_open = candle.get("open", price)
+        intrabar_return = price / candle_open if candle_open > 0 else 1.0
+        change_5m = (intrabar_return ** (1 / (interval_hours * 12)) - 1) * 100
 
-        # Estimate market cap from volume (rough heuristic for backtests)
-        # Typical vol/mcap ratio is 0.05-0.3 for most tokens
-        vol = candle.get("volume", 0)
-        estimated_mcap = vol * 5 if vol > 0 else 0  # Conservative estimate
+        def quote_volume(row):
+            turnover = row.get("turnover") or row.get("volume_usd")
+            if turnover:
+                return float(turnover)
+            return float(row.get("volume", 0) or 0) * float(row.get("close", 0) or 0)
+
+        candle_volume_usd = quote_volume(candle)
+        if candle_window:
+            interval_hours = max(
+                (candle_window[-1].get("timestamp", 0) - candle_window[-2].get("timestamp", 0))
+                / 3_600_000,
+                1.0,
+            ) if len(candle_window) >= 2 else interval_hours
+            bars_24h = max(1, int(24 / interval_hours))
+            volume_24h = sum(quote_volume(row) for row in candle_window[-bars_24h:])
+        else:
+            volume_24h = candle_volume_usd
+        estimated_mcap = candle_volume_usd * 5 if estimate_market_cap else 0
 
         token = Token(symbol=symbol)
         token.metrics = TokenMetrics(
@@ -802,9 +827,9 @@ class BacktestEngine:
             price_change_5m=change_5m,
             price_change_1h=change_1h,
             price_change_24h=change_24h,
-            volume_1h=candle.get("volume", 0),
-            volume_5m=candle.get("volume", 0) / 12,  # Approximate
-            volume_24h=candle.get("volume", 0) * 24,  # Approximate
+            volume_1h=candle_volume_usd / interval_hours,
+            volume_5m=candle_volume_usd / (interval_hours * 12),
+            volume_24h=volume_24h,
             market_cap=estimated_mcap,
             liquidity_usd=0,
         )
@@ -824,16 +849,17 @@ class BacktestEngine:
         """
         Run crime pump detection backtest.
 
-        Walks through historical candles and checks for crime pump indicators:
-        - Volume spikes (>3x average)
-        - Sudden price surges (>10% in one candle)
-        - Volume + price combo (the classic crime pump signature)
-
-        Then checks what happened AFTER each trigger to measure accuracy.
+        Replays each historical candle through the same four detection layers
+        used by live scans. Only timestamped market data is used for each step;
+        unavailable historical chain, funding, and order-book data is reported.
         """
         from core.backtester import CrimeBacktestResult
 
         result = CrimeBacktestResult(symbol=symbol, period_days=days)
+
+        if self._detector is None:
+            result.error = "The crime-pump detector is not available for replay."
+            return result
 
         log.info("crime_backtest_start", symbol=symbol, days=days)
         candles = await self._fetch_historical_candles(symbol, days)
@@ -845,17 +871,9 @@ class BacktestEngine:
         result.start_price = candles[0]["close"]
         result.end_price = candles[-1]["close"]
 
-        # Calculate average volume for baseline
-        volumes = [c.get("volume", 0) for c in candles if c.get("volume", 0) > 0]
-        avg_volume = sum(volumes) / len(volumes) if volumes else 0
-
         triggers = []
         all_pumps = []  # Track all significant price moves
 
-        # TUNED THRESHOLDS (based on backtest: SIREN 52%, RIVER 50% accuracy was too many false positives)
-        PUMP_THRESHOLD = 15.0      # 15% price surge = potential crime pump (was 10% — too sensitive)
-        VOLUME_SPIKE_MULT = 4.0    # 4x average volume = suspicious (was 3x — too many false positives)
-        COMBO_THRESHOLD = 8.0      # Volume spike + 8% price move (was 5% — normal trading noise)
         TRUE_POS_THRESHOLD = 8.0   # Must pump another 8% after trigger to be "correct" (was 5%)
         TRIGGER_COOLDOWN = 3       # Don't re-trigger within 3 candles of last trigger
         LOOKFORWARD = min(8, len(candles) // 4)  # Check 8 candles ahead (was 5 — too short)
@@ -866,6 +884,19 @@ class BacktestEngine:
             candle = candles[i]
             prev = candles[i - 1]
 
+            candle_window = candles[max(0, i - 49):i + 1]
+            token = self._candle_to_token(
+                symbol, candle, prev, candles[i - 2],
+                candle_window=candle_window,
+                estimate_market_cap=False,
+            )
+            alert = await self._detector.scan_token(token, persist=False)
+            for layer in alert.layer_results:
+                if layer.evaluable:
+                    result.layer_evaluable_counts[str(layer.layer_number)] = (
+                        result.layer_evaluable_counts.get(str(layer.layer_number), 0) + 1
+                    )
+
             price = candle["close"]
             prev_price = prev["close"]
             if prev_price <= 0:
@@ -873,41 +904,21 @@ class BacktestEngine:
 
             price_change = (price - prev_price) / prev_price * 100
 
-            # Also check candle HIGH for flash pump-and-dumps
-            # RIVER went $29→$85→$16 in one day — close was $16 but HIGH was $85
-            candle_high = candle.get("high", price)
-            wick_surge = (candle_high - prev_price) / prev_price * 100 if prev_price > 0 else 0
-            is_wick_pump = wick_surge > 50 and (candle_high - price) / candle_high * 100 > 20  # Big wick + rejection
-
-            volume = candle.get("volume", 0)
+            volume = float(candle.get("turnover") or candle.get("volume_usd") or
+                           (candle.get("volume", 0) or 0) * price)
+            prior = candles[max(0, i - 30):i]
+            prior_volumes = [
+                float(item.get("turnover") or item.get("volume_usd") or
+                      (item.get("volume", 0) or 0) * (item.get("close", 0) or 0))
+                for item in prior
+            ]
+            avg_volume = sum(prior_volumes) / len(prior_volumes) if prior_volumes else 0
             vol_ratio = volume / avg_volume if avg_volume > 0 else 0
 
-            # === SINGLE-CANDLE DETECTION (sharp spikes) ===
-            is_volume_spike = vol_ratio > VOLUME_SPIKE_MULT
-            is_price_surge = price_change > PUMP_THRESHOLD
-            is_crime_pump_signal = is_volume_spike and price_change > COMBO_THRESHOLD
-
-            # === ROLLING WINDOW DETECTION (multi-candle pumps like RIVER) ===
-            # Check cumulative move over last 3 and 5 candles
-            # This catches pumps that build over several candles (each 8-12% but total 50%+)
-            is_rolling_pump = False
-            rolling_type = ""
-            if i >= 5:
-                price_5_ago = candles[i - 5]["close"]
-                if price_5_ago > 0:
-                    cumulative_5 = (price - price_5_ago) / price_5_ago * 100
-                    if cumulative_5 > 40:  # 40%+ over 5 candles (~20h for 4h candles)
-                        is_rolling_pump = True
-                        rolling_type = "Multi-Candle Pump (5)"
-            if not is_rolling_pump and i >= 3:
-                price_3_ago = candles[i - 3]["close"]
-                if price_3_ago > 0:
-                    cumulative_3 = (price - price_3_ago) / price_3_ago * 100
-                    if cumulative_3 > 30:  # 30%+ over 3 candles (~12h)
-                        is_rolling_pump = True
-                        rolling_type = "Multi-Candle Pump (3)"
-
-            triggered = is_price_surge or is_crime_pump_signal or is_rolling_pump or is_wick_pump
+            # The detector's own four-layer results and momentum override
+            # decide whether a replay event fires. Volume is retained only as
+            # descriptive context in the result.
+            triggered = alert.total_layers_triggered > 0
 
             # Cooldown: skip if we triggered recently (same pump event)
             if triggered and (i - last_trigger_idx) < TRIGGER_COOLDOWN:
@@ -930,14 +941,14 @@ class BacktestEngine:
                 # True positive = price continued up >8% after trigger (was 5%)
                 was_correct = pump_after > TRUE_POS_THRESHOLD
 
-                if is_wick_pump:
-                    trigger_type = f"Flash Pump & Dump (wick +{wick_surge:.0f}%)"
-                elif is_rolling_pump:
-                    trigger_type = rolling_type
-                elif is_crime_pump_signal:
-                    trigger_type = "Volume Spike + Surge"
+                layer_names = [layer.layer_name for layer in alert.layer_results
+                               if layer.triggered]
+                if alert.is_confirmed:
+                    trigger_type = "Confirmed: " + ", ".join(layer_names)
+                elif layer_names:
+                    trigger_type = "Watch: " + ", ".join(layer_names)
                 else:
-                    trigger_type = "Price Surge"
+                    trigger_type = "Price Momentum Watch"
 
                 triggers.append({
                     "type": trigger_type,
@@ -948,7 +959,18 @@ class BacktestEngine:
                     "dump_after_pct": dump_after,
                     "was_correct": was_correct,
                     "volume_ratio": vol_ratio,
+                    "layers": [layer.layer_number for layer in alert.layer_results
+                               if layer.triggered],
+                    "evaluable_layers": [layer.layer_number for layer in alert.layer_results
+                                         if layer.evaluable],
+                    "confidence": alert.confidence_level.value,
                 })
+
+                for layer in alert.layer_results:
+                    if layer.triggered:
+                        result.layer_trigger_counts[str(layer.layer_number)] = (
+                            result.layer_trigger_counts.get(str(layer.layer_number), 0) + 1
+                        )
 
             # Track all significant pumps (>20%) to find missed ones (was 15%)
             if price_change > 20:
@@ -957,6 +979,12 @@ class BacktestEngine:
         # Calculate results
         result.triggers = triggers
         result.total_triggers = len(triggers)
+        result.data_coverage = (
+            "All four analyzers were replayed using historical OHLCV. "
+            "Historical holder balances, funding rates, and order-book snapshots "
+            "were not available in the candle dataset, so those checks are marked "
+            "unevaluable for the affected candles."
+        )
 
         if triggers:
             true_pos = [t for t in triggers if t["was_correct"]]
@@ -1075,6 +1103,9 @@ class CrimeBacktestResult:
     biggest_pump_pct: float = 0.0
     triggers: list = field(default_factory=list)
     pumps_detected: list = field(default_factory=list)
+    layer_trigger_counts: dict = field(default_factory=dict)
+    layer_evaluable_counts: dict = field(default_factory=dict)
+    data_coverage: str = ""
     start_price: float = 0.0
     end_price: float = 0.0
     error: str = ""
@@ -1101,6 +1132,17 @@ def format_crime_backtest_result(result: CrimeBacktestResult) -> str:
         f"  Accuracy: {result.detection_accuracy:.1f}%",
         "",
     ])
+
+    if result.layer_trigger_counts or result.layer_evaluable_counts:
+        lines.append("Layer Replay:")
+        for layer_number, layer_name in (
+            ("1", "On-chain"), ("2", "Perp/index"),
+            ("3", "Funding"), ("4", "Spot/order book"),
+        ):
+            evaluated = result.layer_evaluable_counts.get(layer_number, 0)
+            triggered = result.layer_trigger_counts.get(layer_number, 0)
+            lines.append(f"  L{layer_number} {layer_name}: {triggered} triggers / {evaluated} evaluated candles")
+        lines.append("")
 
     if result.avg_pump_after_trigger_pct > 0:
         lines.extend([
@@ -1132,8 +1174,7 @@ def format_crime_backtest_result(result: CrimeBacktestResult) -> str:
         f"  Start: {start_str}",
         f"  End: {end_str}",
         "",
-        "Note: Crime pump detection uses volume spikes, price surges, "
-        "and pattern matching against historical manipulation schemes.",
+        result.data_coverage or "All detection layers were replayed over historical candles.",
     ])
 
     return "\n".join(lines)

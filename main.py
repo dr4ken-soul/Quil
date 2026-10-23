@@ -20,7 +20,7 @@ from core.backtester import BacktestEngine
 from detection.crime_pump_detector import CrimePumpDetector
 from telegram_bot.bot import QuilTelegramBot
 from utils.logger import setup_logging, get_logger
-from utils.database import init_db
+from utils.database import init_db, get_active_watchlist, update_watchlist_last_scanned
 from models.token import Token, TokenMetrics
 
 log = get_logger("main")
@@ -165,15 +165,54 @@ class QuilBot:
                 scan_start = utcnow()
                 log.info("scan_cycle_start")
 
-                # Step 1: Find tokens with volume anomalies
+                # Step 1: Find new anomaly candidates and rotate through the
+                # least-recently-scanned watchlist entries.
                 anomalies = await self.data_pipeline.scan_for_anomalies()
-                log.info("anomalies_found", count=len(anomalies))
+                try:
+                    watchlist = await get_active_watchlist()
+                except Exception as e:
+                    log.error("watchlist_load_error", error=str(e))
+                    watchlist = []
+
+                watchlist.sort(key=lambda item: (
+                    bool(item.get("last_scanned")),
+                    str(item.get("last_scanned") or ""),
+                ))
+                candidates = []
+                seen = set()
+
+                for item in watchlist[:20]:
+                    symbol = str(item.get("token_symbol") or "").upper().replace("$", "")
+                    if not symbol:
+                        continue
+                    address = item.get("contract_address") or symbol
+                    key = str(item.get("contract_address") or symbol).lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    candidates.append({
+                        "symbol": symbol,
+                        "address": address,
+                        "watchlist_symbol": symbol,
+                        "source": "watchlist",
+                    })
+
+                for anomaly in anomalies[:20]:
+                    symbol = str(anomaly.get("symbol") or "UNKNOWN").upper()
+                    key = str(anomaly.get("address") or symbol).lower()
+                    if key not in seen:
+                        seen.add(key)
+                        candidates.append({**anomaly, "source": "anomaly"})
+
+                log.info("scan_candidates_ready", anomalies=len(anomalies),
+                         watchlist=len(watchlist), queued=len(candidates))
 
                 alerts_sent = 0
                 watch_count = 0
 
                 # Step 2: Analyze each anomaly candidate
-                for anomaly in anomalies[:20]:  # Limit per cycle
+                for anomaly in candidates:
+                    watchlist_symbol = anomaly.get("watchlist_symbol")
                     try:
                         symbol = anomaly.get("symbol", "UNKNOWN")
 
@@ -208,10 +247,10 @@ class QuilBot:
 
                         # Send alert if warranted
                         if self.detector.should_send_alert(alert):
+                            await self.telegram.send_alert(alert)
+                            self._set_cooldown(symbol)
                             if alert.is_confirmed:
-                                await self.telegram.send_alert(alert)
                                 alerts_sent += 1
-                                self._set_cooldown(symbol)
                             else:
                                 watch_count += 1
 
@@ -223,6 +262,13 @@ class QuilBot:
                                 token=anomaly.get("symbol", "?"),
                                 error=str(e))
                         continue
+                    finally:
+                        if watchlist_symbol:
+                            try:
+                                await update_watchlist_last_scanned(watchlist_symbol)
+                            except Exception as e:
+                                log.warning("watchlist_scan_time_update_failed",
+                                            token=watchlist_symbol, error=str(e))
 
                 scan_duration = (utcnow() - scan_start).total_seconds()
                 log.info("scan_cycle_complete",

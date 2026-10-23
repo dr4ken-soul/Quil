@@ -9,8 +9,8 @@ Autonomous crypto trading bot with a four-layer crime pump detection system, exp
 | 1 | Foundation (config, models, database, logging) | ✅ Complete |
 | 2 | Data layer (Bybit, CoinGecko, DexScreener, Coinglass, explorers) | ✅ Complete |
 | 3 | Crime pump detection (4 layers + lifecycle tracker) | ✅ Complete |
-| 4 | hl-trap-bot 5-gate pipeline | ✅ Complete |
-| 5 | Framework adapters (Freqtrade, Hummingbot, OctoBot) | ✅ Complete |
+| 4 | hl-trap-bot 5-gate pipeline (used by trade analysis when candles are available) | ✅ Complete |
+| 5 | Framework adapters (Freqtrade indicators, public cross-exchange data, OctoBot context) | ✅ Complete |
 | 6 | Signal aggregation + execution engine + risk manager | ✅ Complete |
 | 7 | Telegram bot interface (all commands) | ✅ Complete |
 | 8 | Autonomous market scanning | ✅ Complete |
@@ -28,6 +28,8 @@ Autonomous crypto trading bot with a four-layer crime pump detection system, exp
 ### 1. Crime Pump Detection
 Scans the market continuously for coordinated manipulation across 4 detection layers (on-chain supply, perp/index manipulation, funding rate dynamics, order book manipulation). Classifies tokens into lifecycle stages (accumulation → OI matrix → trap → distribution).
 
+The autonomous scanner processes up to 20 watchlist entries and 20 new anomaly candidates per cycle. Watchlist entries are prioritized by oldest scan time. Watch and confirmed alerts are sent through Telegram subject to the configured cooldown.
+
 ### 2. Trading Analysis
 Expert-level technical analysis engine that reads charts independently. Uses RSI, EMA Crossovers, MACD, Bollinger Bands, 8 candlestick patterns, and support/resistance levels to generate trade signals with direction (Long/Short), entry, SL, TP1, TP2, leverage, and position sizing. Crime pump detection is a **warning overlay only** — it does not drive trade direction.
 
@@ -44,6 +46,18 @@ Token Price Resolution (priority order):
 2. CoinGecko Search    → Dynamic symbol search (works for ANY token)
 3. DexScreener         → DEX pool price (fallback for DEX-only tokens)
 ```
+
+## Data Sources and Coverage
+
+- DexScreener pair prices, volume, liquidity, and venue names are used for DEX market context.
+- CCXT public spot endpoints collect Binance, Bybit, and OKX prices and a Bybit order book when that symbol is listed. This adapter reads market data only; it does not place orders.
+- CoinGlass API v4 supplies current and historical open interest, funding, global and top-trader long/short ratios, liquidations, and liquidation heatmaps. Coverage depends on the token, endpoint, and CoinGlass plan.
+- Etherscan/BscScan holder and transfer endpoints can populate holder concentration, contract age, and transfer activity when those endpoints and API keys are available. Solscan holder coverage is also best-effort.
+- Twitter/X mention metrics are optional and require `TWITTER_BEARER_TOKEN`. Quil does not have a Telegram message-search provider; a missing Telegram count is treated as unknown.
+
+Unknown values stay unknown. A missing holder list does not mean that holders are concentrated, an unavailable liquidity-lock source does not mean liquidity is unlocked, and missing social data does not count as a quiet market. Cold-wallet outflows are not available without a provider that identifies exchange-controlled wallets.
+
+Crime-pump alerts require at least `MIN_LAYERS_CONFIRMED` triggered layers and at least that many evaluable layers. A single-layer result is a watch alert. The crime-pump backtest replays the same four analyzers across historical candles; the candle dataset does not include historical holder balances, funding, or order-book snapshots, so those checks are reported as unevaluable.
 
 ## Telegram Commands
 
@@ -114,9 +128,10 @@ python main.py
 |----------|---------|
 | `COINGLASS_API_KEY` | OI, funding rates, liquidations |
 | `COINGECKO_API_KEY` | Backup prices + historical data |
-| `ETHERSCAN_API_KEY` | EVM on-chain data |
-| `BSCSCAN_API_KEY` | BSC on-chain data |
+| `ETHERSCAN_API_KEY` | Etherscan V2 on-chain data for Ethereum and BSC; holder lists require an API plan that includes Pro endpoints |
+| `BSCSCAN_API_KEY` | Optional BscScan community-endpoint fallback when no Etherscan V2 key is set |
 | `SOLSCAN_API_KEY` | Solana on-chain data |
+| `TWITTER_BEARER_TOKEN` | Optional X mention data for social activity |
 
 ### Bot Settings
 | Variable | Default | Purpose |
@@ -155,8 +170,8 @@ python main.py
 ## Database
 
 Supports two backends:
-- **PostgreSQL (Supabase)** — Recommended. Set `DATABASE_URL` to your Supabase connection string. Data persists across Railway redeploys.
-- **SQLite** — Default fallback for local development. Data is lost on Railway redeploys.
+- **PostgreSQL (Supabase)** — Recommended for persistent local and hosted data. Copy the Session Pooler URI from Supabase Connect (port 5432) into `DATABASE_URL`.
+- **SQLite** — Default fallback for local development. Hosted filesystems may be lost on restarts or redeploys.
 
 ## Project Structure
 

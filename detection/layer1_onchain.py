@@ -54,6 +54,10 @@ class OnChainSupplyAnalyzer:
         result = DetectionLayerResult(
             layer_number=self.layer_number,
             layer_name=self.layer_name,
+            evaluable=(
+                token.onchain.data_available
+                or (token.metrics.market_cap > 0 and token.metrics.liquidity_usd > 0)
+            ),
         )
 
         signals = []
@@ -119,12 +123,12 @@ class OnChainSupplyAnalyzer:
     def _check_supply_concentration(self, token: Token,
                                      wallet_data: dict = None) -> tuple[float, Optional[dict]]:
         """Check if a few wallets control a disproportionate share of supply."""
-        concentration = token.onchain.top10_wallet_pct / 100 if token.onchain.top10_wallet_pct else 0
-
-        # Also check from wallet analysis data if available
-        if wallet_data and wallet_data.get("analyzable"):
-            concentration = max(concentration,
-                              wallet_data.get("top10_concentration_pct", 0) / 100)
+        # Wallet clustering is based on transfer recipients, not token balances.
+        # Only holder-balance data may be used for supply concentration.
+        concentration = (
+            token.onchain.top10_wallet_pct / 100
+            if token.onchain.top10_wallet_pct is not None else 0
+        )
 
         if concentration >= SUPPLY_CONCENTRATION_THRESHOLD:
             return 1.0, {
@@ -149,7 +153,7 @@ class OnChainSupplyAnalyzer:
         Check for large withdrawals from exchange cold wallets.
         This is a direct preparation signal for upcoming manipulation.
         """
-        outflows = token.onchain.cold_wallet_outflows_24h
+        outflows = token.onchain.cold_wallet_outflows_24h or 0.0
         if outflows >= COLD_WALLET_WITHDRAWAL_ALERT_USD:
             return 1.0, {
                 "name": "Cold Wallet Withdrawal",
@@ -174,30 +178,30 @@ class OnChainSupplyAnalyzer:
         in the 24-72 hour window before a potential pump.
         """
         if wallet_data and wallet_data.get("analyzable"):
-            recent_count = wallet_data.get("recent_buyers_count", 0)
-            burst_count = wallet_data.get("burst_buying_wallets", 0)
-            total_wallets = wallet_data.get("total_unique_wallets", 1)
+            recent_count = wallet_data.get("recent_recipients_count", 0)
+            burst_count = wallet_data.get("burst_receiving_wallets", 0)
 
             # High ratio of recent concentrated buying
             if burst_count >= 5 and recent_count > 0:
                 return 1.0, {
-                    "name": "Coordinated Accumulation",
-                    "observation": f"{burst_count} wallets showing burst buying patterns, "
-                                 f"{recent_count} recent buyers in {ACCUMULATION_WINDOW_HOURS}h window",
-                    "significance": "Multiple wallets executing coordinated buy transactions "
-                                  "in short time windows. This matches the pre-pump accumulation "
-                                  "pattern where newly funded wallets buy in clusters.",
+                    "name": "Clustered Token Inflows",
+                    "observation": f"{burst_count} recipient wallets received repeated transfers; "
+                                 f"{recent_count} recipients were active in the "
+                                 f"{ACCUMULATION_WINDOW_HOURS}h window",
+                    "significance": "Repeated token transfers to a small group of recipients "
+                                  "are visible on-chain. Transfers do not prove market buys, but "
+                                  "they can indicate concentrated token movement.",
                 }
             elif burst_count >= 2:
                 return 0.5, {
-                    "name": "Accumulation Activity",
-                    "observation": f"{burst_count} wallets with burst patterns detected",
-                    "significance": "Some coordinated buying detected but below high "
-                                  "confidence threshold.",
+                    "name": "Repeated Token Inflows",
+                    "observation": f"{burst_count} recipient wallets had repeated transfers",
+                    "significance": "Some repeated token movement is visible, but it does not "
+                                  "establish that the transfers were market purchases.",
                 }
 
         # Fall back to new wallet buy count
-        new_wallet_buys = token.onchain.new_wallet_buy_count_1h
+        new_wallet_buys = token.onchain.new_wallet_buy_count_1h or 0
         if new_wallet_buys >= 10:
             return 0.7, {
                 "name": "New Wallet Buying Cluster",
@@ -255,7 +259,7 @@ class OnChainSupplyAnalyzer:
 
     def _check_liquidity_lock(self, token: Token) -> tuple[float, Optional[dict]]:
         """Check if liquidity is locked or unlocked."""
-        if not token.onchain.liquidity_locked:
+        if token.onchain.liquidity_locked is False:
             return 0.5, {
                 "name": "Unlocked Liquidity",
                 "observation": "No liquidity lock detected",
@@ -269,8 +273,8 @@ class OnChainSupplyAnalyzer:
         """
         Check for abnormal transfer volume spikes from a small cluster of wallets.
         """
-        count_24h = token.onchain.transfer_count_24h
-        avg_7d = token.onchain.transfer_count_avg_7d
+        count_24h = token.onchain.transfer_count_24h or 0
+        avg_7d = token.onchain.transfer_count_avg_7d or 0.0
 
         if avg_7d > 0 and count_24h > 0:
             ratio = count_24h / avg_7d

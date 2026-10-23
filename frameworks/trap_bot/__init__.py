@@ -69,7 +69,7 @@ class TrapBotPipeline:
         self.exhaustion_mult = TRAP_BOT_EXHAUSTION_CANDLE_MULTIPLIER
         self.confidence_threshold = TRAP_BOT_CONFIDENCE_THRESHOLD
 
-    async def run_pipeline(self, ohlcv_data: pd.DataFrame) -> TrapDetectionResult:
+    async def run_pipeline(self, ohlcv_data) -> TrapDetectionResult:
         """
         Run the full 5-gate pipeline on OHLCV data.
 
@@ -79,7 +79,27 @@ class TrapBotPipeline:
         result = TrapDetectionResult()
         gate_trace = []
 
-        if ohlcv_data is None or len(ohlcv_data) < self.lookback:
+        if not isinstance(ohlcv_data, pd.DataFrame):
+            rows = list(ohlcv_data) if ohlcv_data is not None else []
+            if rows and isinstance(rows[0], dict):
+                ohlcv_data = pd.DataFrame(rows)
+            elif rows:
+                columns = ["timestamp", "open", "high", "low", "close", "volume"]
+                ohlcv_data = pd.DataFrame(
+                    rows, columns=columns[:len(rows[0])]
+                )
+            else:
+                ohlcv_data = pd.DataFrame()
+        ohlcv_data.columns = [str(column).lower() for column in ohlcv_data.columns]
+        required = {"open", "high", "low", "close", "volume"}
+        if not required.issubset(ohlcv_data.columns):
+            result.gate_trace = "OHLCV data is missing required columns"
+            return result
+        for column in required:
+            ohlcv_data[column] = pd.to_numeric(ohlcv_data[column], errors="coerce")
+        ohlcv_data = ohlcv_data.dropna(subset=list(required)).reset_index(drop=True)
+
+        if len(ohlcv_data) < self.lookback:
             result.gate_trace = "Insufficient data for analysis"
             return result
 

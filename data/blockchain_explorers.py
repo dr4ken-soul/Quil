@@ -21,10 +21,12 @@ class EVMExplorerClient:
     Handles token holder data, transfers, contract age, and wallet analysis.
     """
 
-    def __init__(self, base_url: str, api_key: str, chain_name: str):
+    def __init__(self, base_url: str, api_key: str, chain_name: str,
+                 chain_id: Optional[int] = None):
         self.base_url = base_url
         self.api_key = api_key
         self.chain_name = chain_name
+        self.chain_id = chain_id
         self._client: Optional[httpx.AsyncClient] = None
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -40,6 +42,8 @@ class EVMExplorerClient:
             return None
 
         params["apikey"] = self.api_key
+        if self.chain_id is not None:
+            params["chainid"] = self.chain_id
         try:
             client = await self._get_client()
             response = await client.get(self.base_url, params=params)
@@ -89,6 +93,19 @@ class EVMExplorerClient:
         if data and data.get("result"):
             return data["result"] if isinstance(data["result"], list) else []
         return []
+
+    async def get_token_supply(self, contract_address: str) -> Optional[int]:
+        """Get raw ERC-20 total supply for holder-concentration calculations."""
+        data = await self._request({
+            "module": "stats",
+            "action": "tokensupply",
+            "contractaddress": contract_address,
+        })
+        try:
+            value = data.get("result") if data else None
+            return int(value) if value is not None else None
+        except (ValueError, TypeError):
+            return None
 
     async def get_contract_creation(self, contract_address: str) -> Optional[dict]:
         """Get contract creation transaction to determine token age."""
@@ -170,9 +187,9 @@ class EVMExplorerClient:
         cutoff = now - timedelta(hours=window_hours)
 
         # Track wallet activity
-        wallet_buys = {}     # address -> list of buy timestamps
-        wallet_amounts = {}  # address -> total tokens acquired
-        recent_buyers = []   # Wallets that bought within the window
+        wallet_transfers = {}  # recipient address -> transfer timestamps
+        wallet_amounts = {}    # recipient address -> total transferred tokens
+        recent_recipients = []
 
         for tx in transfers:
             try:
@@ -181,15 +198,15 @@ class EVMExplorerClient:
                 value = int(tx.get("value", 0))
 
                 if to_addr and value > 0:
-                    if to_addr not in wallet_buys:
-                        wallet_buys[to_addr] = []
+                    if to_addr not in wallet_transfers:
+                        wallet_transfers[to_addr] = []
                         wallet_amounts[to_addr] = 0
 
-                    wallet_buys[to_addr].append(timestamp)
+                    wallet_transfers[to_addr].append(timestamp)
                     wallet_amounts[to_addr] += value
 
                     if timestamp >= cutoff:
-                        recent_buyers.append({
+                        recent_recipients.append({
                             "address": to_addr,
                             "timestamp": timestamp.isoformat(),
                             "amount": value,
@@ -209,7 +226,7 @@ class EVMExplorerClient:
 
         # Detect burst buying (multiple buys in short windows)
         burst_wallets = []
-        for addr, timestamps in wallet_buys.items():
+        for addr, timestamps in wallet_transfers.items():
             if len(timestamps) >= 3:
                 timestamps.sort()
                 for i in range(len(timestamps) - 2):
@@ -220,16 +237,16 @@ class EVMExplorerClient:
 
         return {
             "analyzable": True,
-            "total_unique_wallets": len(wallet_buys),
-            "top10_concentration_pct": round(top10_pct, 2),
-            "top20_concentration_pct": round(top20_pct, 2),
-            "recent_buyers_count": len(recent_buyers),
-            "burst_buying_wallets": len(burst_wallets),
+            "total_unique_recipients": len(wallet_transfers),
+            "top10_transfer_concentration_pct": round(top10_pct, 2),
+            "top20_transfer_concentration_pct": round(top20_pct, 2),
+            "recent_recipients_count": len(recent_recipients),
+            "burst_receiving_wallets": len(burst_wallets),
             "top_wallets": [
                 {"address": addr, "amount": amt, "pct": round(amt / total_transferred * 100, 2)}
                 for addr, amt in sorted_wallets[:10]
             ],
-            "recent_buyers": recent_buyers[:20],
+            "recent_recipients": recent_recipients[:20],
             "window_hours": window_hours,
         }
 
@@ -346,16 +363,29 @@ class SolscanClient:
 # ── Factory Functions ─────────────────────────────────────────────────────────
 
 def create_etherscan_client() -> EVMExplorerClient:
-    """Create an Etherscan client."""
+    """Create an Etherscan V2 client for Ethereum mainnet."""
     return EVMExplorerClient(
-        base_url="https://api.etherscan.io/api",
+        base_url="https://api.etherscan.io/v2/api",
         api_key=ETHERSCAN_API_KEY,
         chain_name="ethereum",
+        chain_id=1,
     )
 
 
 def create_bscscan_client() -> EVMExplorerClient:
-    """Create a BscScan client."""
+    """Create a BNB Chain client, preferring the unified Etherscan V2 key.
+
+    A BscScan-only key remains a fallback for its community endpoints, but
+    the unified Etherscan key is needed for V2 coverage and holder-list data.
+    """
+    if ETHERSCAN_API_KEY:
+        return EVMExplorerClient(
+            base_url="https://api.etherscan.io/v2/api",
+            api_key=ETHERSCAN_API_KEY,
+            chain_name="bsc",
+            chain_id=56,
+        )
+
     return EVMExplorerClient(
         base_url="https://api.bscscan.com/api",
         api_key=BSCSCAN_API_KEY,

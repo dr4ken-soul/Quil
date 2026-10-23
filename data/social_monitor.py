@@ -7,6 +7,8 @@ new account activity, influencer involvement, and search volume spikes.
 """
 
 import httpx
+import asyncio
+import time
 from typing import Optional
 from datetime import datetime, timedelta
 from utils.logger import get_logger
@@ -29,6 +31,7 @@ class SocialMonitor:
     def __init__(self):
         self.twitter_token = TWITTER_BEARER_TOKEN
         self._client: Optional[httpx.AsyncClient] = None
+        self._metrics_cache: dict[str, tuple[float, dict]] = {}
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -63,7 +66,7 @@ class SocialMonitor:
             start_time = end_time - timedelta(hours=hours)
 
             response = await client.get(
-                "https://api.twitter.com/2/tweets/search/recent",
+                "https://api.x.com/2/tweets/search/recent",
                 params={
                     "query": query,
                     "max_results": 100,
@@ -171,6 +174,44 @@ class SocialMonitor:
             "new_account_pct": new_acct_pct,
             "reasons": reasons,
         }
+
+    async def get_token_social_metrics(self, ticker: str) -> dict:
+        """Return cached one-hour and 24-hour X activity for a token."""
+        key = ticker.upper().lstrip("$")
+        cached = self._metrics_cache.get(key)
+        if cached and time.monotonic() - cached[0] < 900:
+            return dict(cached[1])
+
+        if not self.twitter_token:
+            return {"available": False, "source": "twitter", "mentions_1h": 0,
+                    "mentions_24h": 0, "mention_velocity": 0.0,
+                    "new_account_pct": 0.0}
+
+        one_hour, one_day = await asyncio.gather(
+            self.get_twitter_mentions(key, hours=1),
+            self.get_twitter_mentions(key, hours=24),
+            return_exceptions=True,
+        )
+        if isinstance(one_hour, Exception):
+            one_hour = {"available": False}
+        if isinstance(one_day, Exception):
+            one_day = {"available": False}
+
+        mentions_1h = int(one_hour.get("mentions_count", 0) or 0)
+        mentions_24h = int(one_day.get("mentions_count", 0) or 0)
+        hourly_baseline = mentions_24h / 24 if one_day.get("available") else 0
+        metrics = {
+            "available": bool(one_hour.get("available")),
+            "source": "twitter",
+            "mentions_1h": mentions_1h,
+            "mentions_24h": mentions_24h,
+            "mention_velocity": round(mentions_1h / max(hourly_baseline, 1), 2)
+                if hourly_baseline else float(mentions_1h),
+            "new_account_pct": float(one_hour.get("new_account_pct", 0) or 0),
+        }
+        if metrics["available"]:
+            self._metrics_cache[key] = (time.monotonic(), metrics)
+        return metrics
 
     async def close(self) -> None:
         """Close the HTTP client."""

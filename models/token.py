@@ -29,33 +29,48 @@ class TokenMetrics(BaseModel):
 
 class OnChainMetrics(BaseModel):
     """On-chain metrics relevant to crime pump detection."""
-    top10_wallet_pct: float = 0.0
-    top20_wallet_pct: float = 0.0
+    top10_wallet_pct: Optional[float] = None
+    top20_wallet_pct: Optional[float] = None
     multisig_wallet_count: int = 0
-    unique_holders: int = 0
-    transfer_count_24h: int = 0
-    transfer_count_avg_7d: float = 0.0
-    new_wallet_buy_count_1h: int = 0
-    cold_wallet_outflows_24h: float = 0.0
-    contract_age_days: int = 0
-    liquidity_locked: bool = False
+    unique_holders: Optional[int] = None
+    transfer_count_24h: Optional[int] = None
+    transfer_count_avg_7d: Optional[float] = None
+    new_wallet_buy_count_1h: Optional[int] = None
+    cold_wallet_outflows_24h: Optional[float] = None
+    contract_age_days: Optional[int] = None
+    liquidity_locked: Optional[bool] = None
     liquidity_lock_duration_days: Optional[int] = None
+    data_available: bool = False
 
 
 class DerivativesMetrics(BaseModel):
     """Derivatives market metrics across exchanges."""
     open_interest: float = 0.0
     oi_change_1h: float = 0.0
+    oi_change_4h: float = 0.0
     oi_change_24h: float = 0.0
     oi_to_mcap_ratio: float = 0.0
     funding_rate: float = 0.0
     funding_rate_avg_7d: float = 0.0
     long_short_ratio: float = 1.0
     long_short_ratio_change_1h: float = 0.0
+    long_short_ratio_change_4h: float = 0.0
+    top_trader_long_short_ratio: Optional[float] = None
+    top_trader_long_short_ratio_change_4h: float = 0.0
     liquidations_long_24h: float = 0.0
     liquidations_short_24h: float = 0.0
     liquidation_heatmap: dict = Field(default_factory=dict)
     exchange_oi_distribution: dict = Field(default_factory=dict)
+    open_interest_available: bool = False
+    oi_history_available: bool = False
+    long_short_ratio_available: bool = False
+    long_short_ratio_history_available: bool = False
+    top_trader_ratio_available: bool = False
+    top_trader_ratio_history_available: bool = False
+    funding_rate_available: bool = False
+    funding_history_available: bool = False
+    liquidation_data_available: bool = False
+    liquidation_heatmap_available: bool = False
 
 
 class ExchangePresence(BaseModel):
@@ -77,6 +92,8 @@ class SocialMetrics(BaseModel):
     new_account_mention_pct: float = 0.0
     influencer_wallet_tokens: bool = False
     search_volume_spike: bool = False
+    twitter_available: bool = False
+    telegram_available: bool = False
 
 
 class Token(BaseModel):
@@ -94,6 +111,7 @@ class Token(BaseModel):
     derivatives: DerivativesMetrics = Field(default_factory=DerivativesMetrics)
     exchange_presence: ExchangePresence = Field(default_factory=ExchangePresence)
     social: SocialMetrics = Field(default_factory=SocialMetrics)
+    order_book_data: dict = Field(default_factory=dict)
 
     # Detection state
     crime_stage: CrimeStage = CrimeStage.NONE

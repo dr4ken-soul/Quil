@@ -21,9 +21,26 @@ from data.blockchain_explorers import (
     EVMExplorerClient,
     SolscanClient,
 )
+from data.social_monitor import SocialMonitor
+from frameworks.hummingbot_adapter import HummingbotAdapter
 from utils.logger import get_logger
 
 log = get_logger("data_pipeline")
+
+
+def number_value(data: dict, *keys) -> Optional[float]:
+    """Read the first finite numeric value from a provider response mapping."""
+    if not isinstance(data, dict):
+        return None
+    for key in keys:
+        value = data.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            continue
+    return None
 
 # Chain ID to Chain enum mapping
 CHAIN_MAP = {
@@ -52,6 +69,8 @@ class DataPipeline:
         self.etherscan = create_etherscan_client()
         self.bscscan = create_bscscan_client()
         self.solscan = create_solscan_client()
+        self.social_monitor = SocialMonitor()
+        self.hummingbot = HummingbotAdapter()
 
         self._source_status = {
             "dexscreener": True,
@@ -59,6 +78,8 @@ class DataPipeline:
             "etherscan": True,
             "bscscan": True,
             "solscan": True,
+            "social": bool(self.social_monitor.twitter_token),
+            "market_microstructure": self.hummingbot.available,
         }
 
     async def build_token_profile(self, query: str) -> Optional[Token]:
@@ -103,6 +124,11 @@ class DataPipeline:
                         price_change_24h=0,
                     ),
                 )
+                await asyncio.gather(
+                    self._enrich_derivatives(token),
+                    self._enrich_social(token),
+                    self._enrich_market_data(token),
+                )
                 token.last_updated = datetime.utcnow()
                 log.info("token_profile_built_minimal", symbol=ticker,
                         price=exchange_price, source=price_source)
@@ -145,11 +171,32 @@ class DataPipeline:
             ),
         )
 
-        # Step 3: Enrich with derivatives data (Coinglass)
-        await self._enrich_derivatives(token)
+        # Preserve venue-level prices from the token's DEX pairs so Layer 4
+        # can compare real markets instead of relying on a liquidity proxy.
+        venue_prices = {}
+        venue_liquidity = {}
+        for pair in pairs:
+            pair_address = str(pair.get("baseToken", {}).get("address", ""))
+            if metrics.get("address") and pair_address.lower() != str(metrics["address"]).lower():
+                continue
+            venue = str(pair.get("dexId") or pair.get("chainId") or "").lower()
+            pair_price = float(pair.get("priceUsd", 0) or 0)
+            pair_liquidity = float(pair.get("liquidity", {}).get("usd", 0) or 0)
+            if venue and pair_price > 0 and pair_liquidity >= venue_liquidity.get(venue, -1):
+                venue_prices[venue] = pair_price
+                venue_liquidity[venue] = pair_liquidity
+        token.exchange_presence.exchange_price_spread = venue_prices
+        token.exchange_presence.exchanges_listed = list(venue_prices)
+        token.exchange_presence.primary_spot_exchange = metrics.get("dex")
 
-        # Step 4: Enrich with on-chain data
-        await self._enrich_onchain(token)
+        # Enrich independent sources concurrently; unavailable providers leave
+        # their availability flags unset rather than turning unknown into zero.
+        await asyncio.gather(
+            self._enrich_derivatives(token),
+            self._enrich_onchain(token),
+            self._enrich_social(token),
+            self._enrich_market_data(token),
+        )
 
         token.last_updated = datetime.utcnow()
         log.info("token_profile_built", symbol=token.symbol,
@@ -469,6 +516,50 @@ class DataPipeline:
 
         return result
 
+    async def _enrich_social(self, token: Token) -> None:
+        """Populate social metrics only when the configured provider succeeds."""
+        try:
+            social = await self.social_monitor.get_token_social_metrics(token.symbol)
+            token.social.twitter_available = bool(social.get("available"))
+            if token.social.twitter_available:
+                token.social.twitter_mentions_1h = int(social.get("mentions_1h", 0) or 0)
+                token.social.twitter_mentions_24h = int(social.get("mentions_24h", 0) or 0)
+                token.social.twitter_mention_velocity = float(
+                    social.get("mention_velocity", 0) or 0
+                )
+                token.social.new_account_mention_pct = float(
+                    social.get("new_account_pct", 0) or 0
+                )
+            # No Telegram search source is currently configured.
+            token.social.telegram_available = False
+            self._source_status["social"] = token.social.twitter_available
+        except Exception as e:
+            log.warning("social_enrich_failed", symbol=token.symbol, error=str(e))
+            token.social.twitter_available = False
+            self._source_status["social"] = False
+
+    async def _enrich_market_data(self, token: Token) -> None:
+        """Add public CEX prices and real order-book depth when available."""
+        try:
+            snapshot = await self.hummingbot.get_market_snapshot(token.symbol)
+            prices = snapshot.get("exchange_prices", {})
+            if prices:
+                token.exchange_presence.exchange_price_spread.update(prices)
+                token.exchange_presence.exchanges_listed = sorted(
+                    set(token.exchange_presence.exchanges_listed) | set(prices)
+                )
+            order_book = snapshot.get("order_book")
+            if order_book and order_book.get("bids") and order_book.get("asks"):
+                token.order_book_data = order_book
+            self._source_status["market_microstructure"] = bool(
+                prices or token.exchange_presence.exchange_price_spread
+                or token.order_book_data
+            )
+        except Exception as e:
+            log.warning("market_microstructure_enrich_failed",
+                        symbol=token.symbol, error=str(e))
+            self._source_status["market_microstructure"] = False
+
     async def _enrich_derivatives(self, token: Token) -> None:
         """Enrich token with derivatives data from Coinglass."""
         try:
@@ -478,15 +569,55 @@ class DataPipeline:
                 self._source_status["coinglass"] = False
                 return
 
+            def rows(data):
+                if isinstance(data, list):
+                    return [item for item in data if isinstance(item, dict)]
+                if isinstance(data, dict):
+                    for key in ("list", "data", "rows", "result"):
+                        value = data.get(key)
+                        if isinstance(value, list):
+                            return [item for item in value if isinstance(item, dict)]
+                    return [data]
+                return []
+
+            def number(item, *keys):
+                if not isinstance(item, dict):
+                    return None
+                for key in keys:
+                    value = item.get(key)
+                    if value not in (None, ""):
+                        try:
+                            return float(value)
+                        except (ValueError, TypeError):
+                            continue
+                return None
+
             # Open interest
             oi_data = snapshot.get("open_interest")
-            if oi_data:
-                if isinstance(oi_data, dict):
-                    token.derivatives.open_interest = float(oi_data.get("openInterest", 0) or 0)
-                elif isinstance(oi_data, list) and len(oi_data) > 0:
-                    token.derivatives.open_interest = sum(
-                        float(item.get("openInterest", 0) or 0) for item in oi_data
-                    )
+            oi_rows = rows(oi_data)
+            aggregate_oi = next((
+                number(item, "open_interest_usd", "openInterest", "open_interest", "oi", "value")
+                for item in oi_rows if str(item.get("exchange", "")).lower() == "all"
+            ), None)
+            oi_values = [number(item, "open_interest_usd", "openInterest", "open_interest", "oi", "value")
+                         for item in oi_rows]
+            oi_values = [value for value in oi_values if value is not None and value > 0]
+            if aggregate_oi and aggregate_oi > 0:
+                token.derivatives.open_interest = aggregate_oi
+                token.derivatives.open_interest_available = True
+            elif oi_values:
+                token.derivatives.open_interest = sum(oi_values)
+                token.derivatives.open_interest_available = True
+            aggregate_row = next((
+                item for item in oi_rows if str(item.get("exchange", "")).lower() == "all"
+            ), None)
+            if aggregate_row:
+                one_hour_change = number(aggregate_row, "open_interest_change_percent_1h")
+                one_day_change = number(aggregate_row, "open_interest_change_percent_24h")
+                if one_hour_change is not None:
+                    token.derivatives.oi_change_1h = one_hour_change
+                if one_day_change is not None:
+                    token.derivatives.oi_change_24h = one_day_change
 
             # Calculate OI to market cap ratio
             if token.metrics.market_cap > 0 and token.derivatives.open_interest > 0:
@@ -496,48 +627,177 @@ class DataPipeline:
 
             # OI by exchange distribution
             oi_by_exchange = snapshot.get("oi_by_exchange")
-            if oi_by_exchange and isinstance(oi_by_exchange, list):
-                for item in oi_by_exchange:
-                    ex = item.get("exchange", item.get("exchangeName", "")).lower()
-                    oi = float(item.get("openInterest", 0) or 0)
+            if oi_by_exchange:
+                for item in rows(oi_by_exchange):
+                    ex = str(item.get("exchange", item.get("exchangeName", ""))).lower()
+                    if ex == "all":
+                        continue
+                    oi = number(item, "open_interest_usd", "openInterest", "open_interest", "oi", "value") or 0
                     if ex and oi > 0:
                         token.derivatives.exchange_oi_distribution[ex] = oi
 
+            # Historical open interest supports the 1h/24h change and the
+            # hedged-OI check. Use the provider's close value when available.
+            oi_history = rows(snapshot.get("oi_history"))
+            oi_points = []
+            for item in oi_history:
+                value = number(item, "close", "openInterest", "open_interest", "oi", "value")
+                if value is not None and value > 0:
+                    timestamp = number(item, "time", "timestamp", "t") or 0
+                    oi_points.append((timestamp, value))
+            oi_points.sort(key=lambda point: point[0])
+            if len(oi_points) >= 2:
+                previous, current = oi_points[-2][1], oi_points[-1][1]
+                if previous > 0:
+                    token.derivatives.oi_change_4h = (current - previous) / previous * 100
+                    token.derivatives.oi_history_available = True
+                if len(oi_points) >= 7 and oi_points[-7][1] > 0:
+                    token.derivatives.oi_change_24h = (
+                        (current - oi_points[-7][1]) / oi_points[-7][1] * 100
+                    )
+
             # Funding rates
             funding_data = snapshot.get("funding_rates")
-            if funding_data and isinstance(funding_data, list):
-                # Use the weighted average or first available
-                rates = [float(f.get("fundingRate", f.get("rate", 0)) or 0)
-                        for f in funding_data if f.get("fundingRate") or f.get("rate")]
-                if rates:
-                    token.derivatives.funding_rate = sum(rates) / len(rates)
+            rates = []
+            for item in rows(funding_data):
+                rates.extend(
+                    rate for rate in (
+                        number(rate_item, "funding_rate", "fundingRate", "rate")
+                        for group in ("stablecoin_margin_list", "token_margin_list")
+                        for rate_item in (item.get(group, []) or [])
+                    ) if rate is not None
+                )
+                direct_rate = number(item, "fundingRate", "funding_rate", "rate")
+                if direct_rate is not None:
+                    rates.append(direct_rate)
+            rates = [rate for rate in rates if rate is not None]
+            if rates:
+                token.derivatives.funding_rate = sum(rates) / len(rates)
+                token.derivatives.funding_rate_available = True
 
             # Weighted funding
             weighted = snapshot.get("weighted_funding")
-            if weighted and isinstance(weighted, dict):
-                token.derivatives.funding_rate = float(
-                    weighted.get("weightedRate", token.derivatives.funding_rate) or
-                    token.derivatives.funding_rate
+            weighted_rows = rows(weighted)
+            weighted_rows.sort(key=lambda item: number(item, "time", "timestamp", "t") or 0)
+            weighted_rate = (
+                number(weighted_rows[-1], "close", "weightedRate", "weighted_rate", "rate")
+                if weighted_rows else number(weighted, "weightedRate", "weighted_rate", "rate")
+            )
+            if weighted_rate is not None:
+                token.derivatives.funding_rate = weighted_rate
+                token.derivatives.funding_rate_available = True
+
+            funding_history = rows(snapshot.get("funding_history"))
+            funding_points = []
+            for item in funding_history:
+                rate = number(item, "close", "fundingRate", "funding_rate", "rate")
+                timestamp = number(item, "time", "timestamp", "t") or 0
+                if rate is not None:
+                    funding_points.append((timestamp, rate))
+            recent_funding = [point[1] for point in funding_points
+                              if not point[0] or point[0] >= datetime.utcnow().timestamp() * 1000 - 7 * 86400 * 1000]
+            if recent_funding:
+                token.derivatives.funding_rate_avg_7d = (
+                    sum(recent_funding) / len(recent_funding)
                 )
+                token.derivatives.funding_history_available = True
 
             # Long/short ratio
             ls_data = snapshot.get("long_short_ratio")
-            if ls_data and isinstance(ls_data, list) and len(ls_data) > 0:
-                latest = ls_data[-1] if isinstance(ls_data[-1], dict) else {}
-                token.derivatives.long_short_ratio = float(
-                    latest.get("longShortRatio", latest.get("longRate", 1)) or 1
-                )
+            ls_rows = rows(ls_data)
+            ls_points = []
+            for item in ls_rows:
+                value = number(item, "global_account_long_short_ratio", "longShortRatio",
+                               "long_short_ratio", "ratio", "longRate")
+                if value is not None and value > 0:
+                    timestamp = number(item, "time", "timestamp", "t") or 0
+                    ls_points.append((timestamp, value))
+            ls_points.sort(key=lambda point: point[0])
+            if ls_points:
+                token.derivatives.long_short_ratio = ls_points[-1][1]
+                token.derivatives.long_short_ratio_available = True
+                if len(ls_points) >= 2 and ls_points[-2][1] > 0:
+                    token.derivatives.long_short_ratio_history_available = True
+                    token.derivatives.long_short_ratio_change_4h = (
+                        (ls_points[-1][1] - ls_points[-2][1]) / ls_points[-2][1] * 100
+                    )
+
+            # Top-trader positioning can qualify the generic account ratio
+            # when evaluating whether an open-interest move was genuinely hedged.
+            top_trader_points = []
+            for item in rows(snapshot.get("top_trader_long_short")):
+                value = number(item, "top_account_long_short_ratio", "top_position_long_short_ratio",
+                               "longShortRatio", "long_short_ratio", "ratio")
+                if value is not None and value > 0:
+                    timestamp = number(item, "time", "timestamp", "t") or 0
+                    top_trader_points.append((timestamp, value))
+            top_trader_points.sort(key=lambda point: point[0])
+            if top_trader_points:
+                token.derivatives.top_trader_long_short_ratio = top_trader_points[-1][1]
+                token.derivatives.top_trader_ratio_available = True
+                if len(top_trader_points) >= 2:
+                    previous = top_trader_points[-2][1]
+                    if previous > 0:
+                        token.derivatives.top_trader_ratio_history_available = True
+                        token.derivatives.top_trader_long_short_ratio_change_4h = (
+                            (top_trader_points[-1][1] - previous) / previous * 100
+                        )
 
             # Liquidation data
             liq_data = snapshot.get("liquidations")
-            if liq_data and isinstance(liq_data, list):
-                for item in liq_data:
-                    long_liq = float(item.get("longLiquidationUsd", 0) or 0)
-                    short_liq = float(item.get("shortLiquidationUsd", 0) or 0)
+            liq_rows = rows(liq_data)
+            if liq_rows:
+                token.derivatives.liquidation_data_available = True
+                for item in liq_rows:
+                    long_liq = number(item, "aggregated_long_liquidation_usd", "longLiquidationUsd",
+                                      "longLiquidation", "long_liquidation_usd") or 0
+                    short_liq = number(item, "aggregated_short_liquidation_usd", "shortLiquidationUsd",
+                                       "shortLiquidation", "short_liquidation_usd") or 0
                     token.derivatives.liquidations_long_24h += long_liq
                     token.derivatives.liquidations_short_24h += short_liq
 
-            self._source_status["coinglass"] = True
+            # Normalize liquidation heatmap records into price -> USD size.
+            heatmap = snapshot.get("liquidation_heatmap")
+            normalized_heatmap = {}
+            heatmap_data = heatmap.get("data", heatmap) if isinstance(heatmap, dict) else heatmap
+            if isinstance(heatmap_data, dict):
+                y_axis = heatmap_data.get("y_axis", [])
+                cells = heatmap_data.get("liquidation_leverage_data", [])
+                for cell in cells if isinstance(cells, list) else []:
+                    if not isinstance(cell, (list, tuple)) or len(cell) < 3:
+                        continue
+                    try:
+                        y_index, amount = int(cell[1]), float(cell[2])
+                        price = float(y_axis[y_index])
+                        if price > 0 and amount > 0:
+                            key = str(price)
+                            normalized_heatmap[key] = normalized_heatmap.get(key, 0.0) + amount
+                    except (ValueError, TypeError, IndexError):
+                        continue
+            heatmap_rows = rows(heatmap_data)
+            for item in heatmap_rows:
+                price = number(item, "price", "priceLevel", "price_level", "level")
+                amount = number(item, "liquidationUsd", "liquidation_usd", "totalUsd",
+                                "total", "value", "amount")
+                if amount is None:
+                    long_value = number(item, "longLiquidationUsd", "longLiquidation") or 0
+                    short_value = number(item, "shortLiquidationUsd", "shortLiquidation") or 0
+                    amount = long_value + short_value
+                if price and amount and amount > 0:
+                    key = str(price)
+                    normalized_heatmap[key] = normalized_heatmap.get(key, 0.0) + amount
+            if normalized_heatmap:
+                token.derivatives.liquidation_heatmap = normalized_heatmap
+                token.derivatives.liquidation_heatmap_available = True
+
+            self._source_status["coinglass"] = any((
+                token.derivatives.open_interest_available,
+                token.derivatives.funding_rate_available,
+                token.derivatives.long_short_ratio_available,
+                token.derivatives.top_trader_ratio_available,
+                token.derivatives.liquidation_data_available,
+                token.derivatives.liquidation_heatmap_available,
+            ))
 
         except Exception as e:
             log.error("derivatives_enrich_failed", symbol=token.symbol, error=str(e))
@@ -554,27 +814,90 @@ class DataPipeline:
                 return
 
             if isinstance(explorer, EVMExplorerClient):
-                # Get contract age
-                age = await explorer.get_contract_age_days(token.contract_address)
+                age, transfers, holders, supply = await asyncio.gather(
+                    explorer.get_contract_age_days(token.contract_address),
+                    explorer.get_token_transfers(token.contract_address, offset=1000),
+                    explorer.get_token_holders(token.contract_address, offset=100),
+                    explorer.get_token_supply(token.contract_address),
+                    return_exceptions=True,
+                )
+                if isinstance(age, Exception):
+                    age = None
+                if isinstance(transfers, Exception):
+                    transfers = []
+                if isinstance(holders, Exception):
+                    holders = []
+                if isinstance(supply, Exception):
+                    supply = None
+
                 if age is not None:
                     token.onchain.contract_age_days = age
+                    token.onchain.data_available = True
 
-                # Get recent transfers for clustering analysis
-                transfers = await explorer.get_token_transfers(
-                    token.contract_address, offset=200
-                )
                 if transfers:
-                    token.onchain.transfer_count_24h = len(transfers)
+                    now_ts = datetime.utcnow().timestamp()
+                    timestamps = []
+                    for transfer in transfers:
+                        try:
+                            timestamps.append(int(transfer.get("timeStamp", 0)))
+                        except (ValueError, TypeError):
+                            continue
+                    last_24h = [ts for ts in timestamps if ts >= now_ts - 86400]
+                    last_7d = [ts for ts in timestamps if ts >= now_ts - 7 * 86400]
+                    token.onchain.transfer_count_24h = len(last_24h)
+                    # Only publish a 7-day baseline when the returned page
+                    # likely covers the complete window.
+                    if len(transfers) < 1000 or (timestamps and min(timestamps) <= now_ts - 7 * 86400):
+                        token.onchain.transfer_count_avg_7d = len(last_7d) / 7
+                    token.onchain.data_available = True
+
+                if holders and supply and supply > 0:
+                    balances = []
+                    for holder in holders:
+                        amount = None
+                        for key in ("TokenHolderQuantity", "tokenHolderQuantity", "balance", "quantity", "amount"):
+                            if holder.get(key) not in (None, ""):
+                                try:
+                                    amount = float(holder[key])
+                                    break
+                                except (ValueError, TypeError):
+                                    pass
+                        if amount is not None and amount >= 0:
+                            balances.append(amount)
+                    if balances:
+                        balances.sort(reverse=True)
+                        token.onchain.top10_wallet_pct = min(100.0, sum(balances[:10]) / supply * 100)
+                        token.onchain.top20_wallet_pct = min(100.0, sum(balances[:20]) / supply * 100)
+                        token.onchain.data_available = True
 
             elif isinstance(explorer, SolscanClient):
-                # Get token metadata
-                meta = await explorer.get_token_meta(token.contract_address)
-                if meta and isinstance(meta, dict):
-                    data = meta.get("data", meta)
-                    if isinstance(data, dict):
-                        supply = data.get("supply", 0)
-                        if supply:
-                            token.metrics.total_supply = float(supply)
+                meta, holders = await asyncio.gather(
+                    explorer.get_token_meta(token.contract_address),
+                    explorer.get_token_holders(token.contract_address),
+                    return_exceptions=True,
+                )
+                if isinstance(meta, Exception):
+                    meta = None
+                if isinstance(holders, Exception):
+                    holders = None
+                meta_data = meta.get("data", meta) if isinstance(meta, dict) else {}
+                holder_data = holders.get("data", holders) if isinstance(holders, dict) else {}
+                supply = number_value(meta_data, "supply", "totalSupply", "total_supply")
+                if supply and supply > 0:
+                    token.metrics.total_supply = supply
+                    token.onchain.data_available = True
+                holder_rows = holder_data if isinstance(holder_data, list) else (
+                    holder_data.get("items", holder_data.get("list", []))
+                    if isinstance(holder_data, dict) else []
+                )
+                balances = [number_value(row, "amount", "balance", "quantity")
+                            for row in holder_rows if isinstance(row, dict)]
+                balances = [value for value in balances if value is not None and value >= 0]
+                if supply and supply > 0 and balances:
+                    balances.sort(reverse=True)
+                    token.onchain.top10_wallet_pct = min(100.0, sum(balances[:10]) / supply * 100)
+                    token.onchain.top20_wallet_pct = min(100.0, sum(balances[:20]) / supply * 100)
+                    token.onchain.data_available = True
 
         except Exception as e:
             log.error("onchain_enrich_failed", symbol=token.symbol, error=str(e))
@@ -636,3 +959,5 @@ class DataPipeline:
         await self.etherscan.close()
         await self.bscscan.close()
         await self.solscan.close()
+        await self.social_monitor.close()
+        await self.hummingbot.close()

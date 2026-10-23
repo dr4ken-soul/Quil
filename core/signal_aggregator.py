@@ -51,6 +51,8 @@ class SignalAggregator:
         self._signal_history: list[dict] = []
         self._freqtrade = None
         self._octobot = None
+        self._hummingbot = None
+        self._trap_bot = None
         self._chart_analyzer = None
         # Direction memory — prevents flip-flopping between LONG/SHORT
         # Stores {symbol: (direction, timestamp)} for recent signals
@@ -71,6 +73,18 @@ class SignalAggregator:
         try:
             from frameworks.octobot_adapter import OctoBotAdapter
             self._octobot = OctoBotAdapter()
+        except Exception:
+            pass
+
+        try:
+            from frameworks.hummingbot_adapter import HummingbotAdapter
+            self._hummingbot = HummingbotAdapter()
+        except Exception:
+            pass
+
+        try:
+            from frameworks.trap_bot import TrapBotPipeline
+            self._trap_bot = TrapBotPipeline()
         except Exception:
             pass
 
@@ -100,11 +114,23 @@ class SignalAggregator:
         """
         log.info("generating_signal", token=token.symbol)
 
+        framework_ohlcv = ohlcv_data
+        if framework_ohlcv is None and multi_tf_data:
+            framework_ohlcv = next((multi_tf_data.get(tf) for tf in ("1h", "15m", "4h")
+                                    if multi_tf_data.get(tf)), None)
+
+        if (trap_result is None and self._trap_bot and framework_ohlcv is not None
+                and len(framework_ohlcv) > 0):
+            try:
+                trap_result = await self._trap_bot.run_pipeline(framework_ohlcv)
+            except Exception as e:
+                log.warning("trap_bot_error", token=token.symbol, error=str(e))
+
         # Step 1: Run technical analysis (the primary driver)
         technical_signals = self._analyze_technical(token, ohlcv_data)
 
         # Step 2: Run framework adapters for deeper analysis
-        framework_signals = await self._run_frameworks(token)
+        framework_signals = await self._run_frameworks(token, framework_ohlcv)
         technical_signals.extend(framework_signals)
 
         # Step 2b: Run MULTI-TIMEFRAME chart analysis
@@ -124,7 +150,7 @@ class SignalAggregator:
                     token=token.symbol,
                     timeframes=list(multi_tf_data.keys()),
                     total_signals=len(technical_signals))
-        elif ohlcv_data:
+        elif ohlcv_data is not None and len(ohlcv_data) > 0:
             # Fallback: single timeframe
             chart_signals = self._run_chart_analysis(ohlcv_data)
             technical_signals.extend(chart_signals)
@@ -142,7 +168,7 @@ class SignalAggregator:
             candle_data = multi_tf_data["4h"]
         elif multi_tf_data and "1h" in multi_tf_data:
             candle_data = multi_tf_data["1h"]
-        elif ohlcv_data:
+        elif ohlcv_data is not None and len(ohlcv_data) > 0:
             candle_data = ohlcv_data
         
         direction, direction_confidence = self._determine_direction(
@@ -184,8 +210,12 @@ class SignalAggregator:
             frameworks.append("crime_pump_overlay")
         if trap_result and trap_result.gate_5_passed:
             frameworks.append("trap_bot")
-        if self._freqtrade:
+        if any(signal.name.startswith("FT:") for signal in technical_signals):
             frameworks.append("freqtrade_indicators")
+        if any(signal.name.startswith("OB:") for signal in technical_signals):
+            frameworks.append("octobot_context")
+        if any(signal.name.startswith("HB:") for signal in technical_signals):
+            frameworks.append("hummingbot_market_data")
 
         signal = TradeSignal(
             token_symbol=token.symbol,
@@ -397,30 +427,51 @@ class SignalAggregator:
 
         return signals
 
-    async def _run_frameworks(self, token: Token) -> list[TechnicalSignal]:
-        """Run external framework adapters for deeper analysis."""
+    async def _run_frameworks(self, token: Token, ohlcv_data=None) -> list[TechnicalSignal]:
+        """Run optional indicator and market-context adapters."""
         signals = []
 
         # Freqtrade adapter — EMA, RSI, MACD, Bollinger Bands
-        if self._freqtrade:
+        if self._freqtrade and ohlcv_data is not None and len(ohlcv_data) >= 20:
             try:
-                ft_result = self._freqtrade.analyze(token)
-                if ft_result:
-                    for indicator_name, result in ft_result.items():
-                        if isinstance(result, dict) and result.get("signal"):
-                            signals.append(TechnicalSignal(
-                                name=f"FT: {indicator_name}",
-                                observation=result.get("observation", str(result.get("signal"))),
-                                significance=result.get("significance", ""),
-                                weight=result.get("weight", 0.5),
-                            ))
+                ft_result = await self._freqtrade.generate_indicators(ohlcv_data)
+                if ft_result.get("available"):
+                    if ft_result.get("ema_9_above_21"):
+                        signals.append(TechnicalSignal(
+                            name="FT: EMA 9/21 bullish crossover",
+                            observation="EMA 9 is above EMA 21",
+                            significance="Short-term trend confirmation from the indicator adapter.",
+                            weight=0.3,
+                        ))
+                    elif not ft_result.get("ema_9_above_21"):
+                        signals.append(TechnicalSignal(
+                            name="FT: EMA 9/21 bearish crossover",
+                            observation="EMA 9 is below EMA 21",
+                            significance="Short-term trend confirmation from the indicator adapter.",
+                            weight=0.3,
+                        ))
+                    if ft_result.get("rsi_oversold") or ft_result.get("rsi_overbought"):
+                        state = "oversold" if ft_result["rsi_oversold"] else "overbought"
+                        signals.append(TechnicalSignal(
+                            name=f"FT: RSI {state}",
+                            observation=f"RSI is {ft_result['rsi']:.1f}",
+                            significance=f"The indicator adapter reports an {state} reading.",
+                            weight=0.25,
+                        ))
+                    signals.append(TechnicalSignal(
+                        name=f"FT: MACD {'bullish' if ft_result['macd_bullish'] else 'bearish'}",
+                        observation=("MACD is above its signal line" if ft_result["macd_bullish"]
+                                     else "MACD is below its signal line"),
+                        significance="Momentum confirmation from the indicator adapter.",
+                        weight=0.25,
+                    ))
             except Exception as e:
                 log.warning("freqtrade_error", error=str(e))
 
         # OctoBot adapter — grid/DCA analysis
         if self._octobot:
             try:
-                ob_result = self._octobot.analyze(token)
+                ob_result = await self._octobot.analyze(token)
                 if ob_result and isinstance(ob_result, dict):
                     strategy = ob_result.get("strategy")
                     if strategy:
@@ -432,6 +483,20 @@ class SignalAggregator:
                         ))
             except Exception as e:
                 log.warning("octobot_error", error=str(e))
+
+        if self._hummingbot:
+            try:
+                hb_result = await self._hummingbot.analyze(token)
+                if hb_result:
+                    signals.append(TechnicalSignal(
+                        name="HB: Cross-exchange price spread",
+                        observation=(f"Venue prices differ by {hb_result['spread_pct']:.2f}% "
+                                     f"({hb_result['buy_exchange']} to {hb_result['sell_exchange']})"),
+                        significance="This is market context for review, not an execution instruction.",
+                        weight=0.25,
+                    ))
+            except Exception as e:
+                log.warning("hummingbot_error", error=str(e))
 
         return signals
 
@@ -446,7 +511,7 @@ class SignalAggregator:
         signals = []
         prefix = f"[{timeframe_label}] " if timeframe_label else ""
 
-        if not self._chart_analyzer or not ohlcv_data:
+        if not self._chart_analyzer or ohlcv_data is None or len(ohlcv_data) == 0:
             return signals
 
         try:
@@ -1075,6 +1140,8 @@ class SignalAggregator:
         if framework == "volume_analysis":
             return 0.5
         if framework == "freqtrade_indicators":
+            return 0.5
+        if framework == "hummingbot_market_data":
             return 0.5
         return 0.3
 

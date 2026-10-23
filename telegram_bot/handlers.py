@@ -1868,9 +1868,14 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     # Check for pending trades awaiting confirmation
-    pending_confirms = _execution_engine._pending_trades
+    pending_confirms = getattr(_execution_engine, "_pending_trades", {})
     # Check for active limit orders being monitored
-    active_limits = getattr(_execution_engine, '_active_limit_orders', {})
+    active_orders = getattr(_execution_engine, "_active_orders", {})
+    active_limits = {
+        key: order for key, order in active_orders.items()
+        if key.startswith(("LIMIT-", "PAPER-LIMIT-"))
+        and order.get("status") == "pending"
+    }
 
     if not pending_confirms and not active_limits:
         await update.message.reply_text(
@@ -1903,17 +1908,27 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if active_limits:
         lines.append(f"📋 Limit Orders Monitoring ({len(active_limits)}):")
         for order_id, order_data in active_limits.items():
-            symbol = order_data.get("symbol", "?")
+            symbol = order_data.get("token_symbol") or order_data.get("symbol", "?")
             limit_price = order_data.get("limit_price", 0)
             direction = order_data.get("direction", "?")
-            created = order_data.get("created")
+            created = order_data.get("created") or order_data.get("timestamp")
             price_str = f"${limit_price:.6f}" if limit_price < 1 else f"${limit_price:,.2f}"
             if created:
-                age_min = (datetime.now(timezone.utc) - created).total_seconds() / 60
-                lines.append(f"  {direction} ${symbol} limit at {price_str}")
-                lines.append(f"  Waiting: {age_min:.1f} min")
+                try:
+                    if isinstance(created, str):
+                        created = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                    if created.tzinfo is None:
+                        created = created.replace(tzinfo=timezone.utc)
+                    age_min = max(0, (datetime.now(timezone.utc) - created).total_seconds() / 60)
+                except (TypeError, ValueError):
+                    age_min = None
+                if age_min is not None:
+                    lines.append(f"  {direction} ${symbol} limit at {price_str}")
+                    lines.append(f"  Waiting: {age_min:.1f} min | ID: {order_id}")
+                else:
+                    lines.append(f"  {direction} ${symbol} limit at {price_str} | ID: {order_id}")
             else:
-                lines.append(f"  {direction} ${symbol} limit at {price_str}")
+                lines.append(f"  {direction} ${symbol} limit at {price_str} | ID: {order_id}")
         lines.append("")
 
     await update.message.reply_text("\n".join(lines))
