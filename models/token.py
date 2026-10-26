@@ -31,6 +31,10 @@ class OnChainMetrics(BaseModel):
     """On-chain metrics relevant to crime pump detection."""
     top10_wallet_pct: Optional[float] = None
     top20_wallet_pct: Optional[float] = None
+    top20_account_pct: Optional[float] = None
+    holder_concentration_source: Optional[str] = None
+    top_holders: list[dict] = Field(default_factory=list)
+    holder_distribution_verified: bool = False
     multisig_wallet_count: int = 0
     unique_holders: Optional[int] = None
     transfer_count_24h: Optional[int] = None

@@ -125,15 +125,26 @@ class OnChainSupplyAnalyzer:
         """Check if a few wallets control a disproportionate share of supply."""
         # Wallet clustering is based on transfer recipients, not token balances.
         # Only holder-balance data may be used for supply concentration.
-        concentration = (
-            token.onchain.top10_wallet_pct / 100
-            if token.onchain.top10_wallet_pct is not None else 0
-        )
+        if token.onchain.top10_wallet_pct is not None:
+            concentration_pct = token.onchain.top10_wallet_pct
+            concentration_label = "Top 10 wallets"
+        elif token.onchain.top20_wallet_pct is not None:
+            concentration_pct = token.onchain.top20_wallet_pct
+            concentration_label = "Top 20 wallets"
+        elif token.onchain.top20_account_pct is not None:
+            concentration_pct = token.onchain.top20_account_pct
+            concentration_label = "Top 20 token accounts (lower bound)"
+        else:
+            # Missing holder data is unknown, never a measured zero.
+            return 0, None
+
+        concentration = concentration_pct / 100
 
         if concentration >= SUPPLY_CONCENTRATION_THRESHOLD:
             return 1.0, {
                 "name": "Supply Concentration",
-                "observation": f"Top 10 wallets control {concentration * 100:.1f}% of supply",
+                "observation": f"{concentration_label} control {concentration * 100:.1f}% of supply",
+                "source": token.onchain.holder_concentration_source,
                 "significance": "Exceeds 90% threshold. Multiple related addresses controlling "
                               "most of the supply is the primary setup pattern for crime pumps. "
                               "This supply is typically held through multisig wallets and handed "
@@ -142,7 +153,8 @@ class OnChainSupplyAnalyzer:
         elif concentration >= 0.70:
             return 0.5, {
                 "name": "Supply Concentration (Elevated)",
-                "observation": f"Top 10 wallets control {concentration * 100:.1f}% of supply",
+                "observation": f"{concentration_label} control {concentration * 100:.1f}% of supply",
+                "source": token.onchain.holder_concentration_source,
                 "significance": "Above 70% but below critical 90% threshold. Worth monitoring "
                               "as concentration may be building toward the accumulation target.",
             }

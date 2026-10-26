@@ -287,7 +287,7 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             risk_result = _execution_engine.risk_manager.validate_trade(trade_signal, token)
 
         # Format the trade analysis
-        message = format_trade_analysis(trade_signal)
+        message = format_trade_analysis(trade_signal, token=token)
 
         # Add risk warnings if any
         if risk_result and risk_result.get("warnings"):
@@ -321,7 +321,7 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await processing_msg.edit_text(message, reply_markup=keyboard)
 
     except Exception as e:
-        log.error("trade_analysis_error", query=query, error=str(e))
+        log.exception("trade_analysis_error", query=query)
         await processing_msg.edit_text(
             f"Error generating trade analysis for ${query}: {str(e)[:200]}"
         )
@@ -1591,7 +1591,7 @@ async def _handle_trade_analysis(query, token_symbol: str) -> None:
             multi_tf_data=multi_tf_data if multi_tf_data else None,
         )
 
-        message = format_trade_analysis(trade_signal)
+        message = format_trade_analysis(trade_signal, token=token)
 
         # Add execution mode
         if _execution_engine:
@@ -1602,7 +1602,7 @@ async def _handle_trade_analysis(query, token_symbol: str) -> None:
         await query.edit_message_text(message, reply_markup=keyboard)
 
     except Exception as e:
-        log.error("trade_analysis_error", token=token_symbol, error=str(e))
+        log.exception("trade_analysis_error", token=token_symbol)
         await query.edit_message_text(f"Error: {str(e)[:200]}")
 
 

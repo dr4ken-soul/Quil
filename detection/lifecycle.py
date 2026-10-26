@@ -106,7 +106,13 @@ class LifecycleTracker:
         oi_change = token.derivatives.oi_change_1h
         price_change = token.metrics.price_change_1h
         price_change_24h = token.metrics.price_change_24h
-        supply_concentration = token.onchain.top10_wallet_pct
+        supply_concentration = (
+            token.onchain.top10_wallet_pct
+            if token.onchain.top10_wallet_pct is not None
+            else token.onchain.top20_wallet_pct
+            if token.onchain.top20_wallet_pct is not None
+            else token.onchain.top20_account_pct
+        )
 
         # Rising OI + rising price = long opening (Stage 1 pattern)
         if oi_change > 10 and price_change > 5:
@@ -137,10 +143,13 @@ class LifecycleTracker:
                 score += 0.1
 
         # High supply concentration (accumulation complete)
-        if supply_concentration > 80:
-            score += 0.25
-        elif supply_concentration > 60:
-            score += 0.1
+        # Holder concentration is optional when providers cannot supply a
+        # complete holder set. Do not compare None to a numeric threshold.
+        if supply_concentration is not None:
+            if supply_concentration > 80:
+                score += 0.25
+            elif supply_concentration > 60:
+                score += 0.1
 
         # Layer 1 (on-chain) should be triggered
         if layer_scores.get(1, 0) > 0.4:
@@ -278,7 +287,8 @@ class LifecycleTracker:
             score += 0.15
 
         # Cold wallet deposits to exchanges (on-chain sell signal)
-        if token.onchain.cold_wallet_outflows_24h < 0:  # Negative = inflows to exchange
+        if (token.onchain.cold_wallet_outflows_24h is not None
+                and token.onchain.cold_wallet_outflows_24h < 0):  # Negative = inflows to exchange
             score += 0.1
 
         return min(score, 1.0)

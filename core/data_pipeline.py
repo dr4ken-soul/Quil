@@ -7,6 +7,7 @@ unified Token objects for the detection engine.
 """
 
 import asyncio
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 from datetime import datetime
 
@@ -39,6 +40,23 @@ def number_value(data: dict, *keys) -> Optional[float]:
         try:
             return float(value)
         except (ValueError, TypeError):
+            continue
+    return None
+
+
+def decimal_value(data: dict, *keys) -> Optional[Decimal]:
+    """Read the first finite decimal value without losing raw token precision."""
+    if not isinstance(data, dict):
+        return None
+    for key in keys:
+        value = data.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            number = Decimal(str(value))
+            if number.is_finite():
+                return number
+        except (InvalidOperation, ValueError, TypeError):
             continue
     return None
 
@@ -851,23 +869,29 @@ class DataPipeline:
                         token.onchain.transfer_count_avg_7d = len(last_7d) / 7
                     token.onchain.data_available = True
 
-                if holders and supply and supply > 0:
+                supply_decimal = Decimal(str(supply)) if supply is not None else None
+                if holders and supply_decimal and supply_decimal > 0:
                     balances = []
                     for holder in holders:
                         amount = None
                         for key in ("TokenHolderQuantity", "tokenHolderQuantity", "balance", "quantity", "amount"):
                             if holder.get(key) not in (None, ""):
                                 try:
-                                    amount = float(holder[key])
+                                    amount = Decimal(str(holder[key]))
                                     break
-                                except (ValueError, TypeError):
+                                except (InvalidOperation, ValueError, TypeError):
                                     pass
-                        if amount is not None and amount >= 0:
+                        if amount is not None and amount.is_finite() and amount >= 0:
                             balances.append(amount)
                     if balances:
                         balances.sort(reverse=True)
-                        token.onchain.top10_wallet_pct = min(100.0, sum(balances[:10]) / supply * 100)
-                        token.onchain.top20_wallet_pct = min(100.0, sum(balances[:20]) / supply * 100)
+                        token.onchain.top10_wallet_pct = float(min(
+                            Decimal("100"), sum(balances[:10]) / supply_decimal * 100
+                        ))
+                        token.onchain.top20_wallet_pct = float(min(
+                            Decimal("100"), sum(balances[:20]) / supply_decimal * 100
+                        ))
+                        token.onchain.holder_concentration_source = "evm_explorer_or_transfer_index"
                         token.onchain.data_available = True
 
             elif isinstance(explorer, SolscanClient):
@@ -882,21 +906,69 @@ class DataPipeline:
                     holders = None
                 meta_data = meta.get("data", meta) if isinstance(meta, dict) else {}
                 holder_data = holders.get("data", holders) if isinstance(holders, dict) else {}
-                supply = number_value(meta_data, "supply", "totalSupply", "total_supply")
+                supply = decimal_value(meta_data, "supply", "totalSupply", "total_supply")
                 if supply and supply > 0:
-                    token.metrics.total_supply = supply
+                    token.metrics.total_supply = float(supply)
                     token.onchain.data_available = True
+                if isinstance(holder_data, dict) and holder_data.get("supply_reconciled") is True:
+                    top_holders = holder_data.get("top_holders", [])
+                    if isinstance(top_holders, list):
+                        token.onchain.top_holders = [
+                            {
+                                "address": row["address"],
+                                "percentage": float(row["percentage"]),
+                            }
+                            for row in top_holders
+                            if isinstance(row, dict)
+                            and row.get("address")
+                            and number_value(row, "percentage") is not None
+                        ]
+                    holder_count = holder_data.get("holder_count")
+                    try:
+                        token.onchain.unique_holders = int(holder_count)
+                    except (ValueError, TypeError):
+                        token.onchain.unique_holders = None
+                    token.onchain.holder_distribution_verified = bool(
+                        token.onchain.top_holders and token.onchain.unique_holders
+                    )
+                concentration = holder_data.get("concentration", {}) if isinstance(holder_data, dict) else {}
+                if isinstance(concentration, dict):
+                    top10 = number_value(concentration, "top10_wallet_pct")
+                    top20 = number_value(concentration, "top20_wallet_pct")
+                    top20_accounts = number_value(concentration, "top20_account_pct")
+                    if top10 is not None:
+                        token.onchain.top10_wallet_pct = top10
+                    if top20 is not None:
+                        token.onchain.top20_wallet_pct = top20
+                    if top20_accounts is not None:
+                        token.onchain.top20_account_pct = top20_accounts
+                    if any(value is not None for value in (top10, top20, top20_accounts)):
+                        token.onchain.holder_concentration_source = (
+                            holders.get("provider") if isinstance(holders, dict) else None
+                        ) or "solana_holder_provider"
+                        token.onchain.data_available = True
                 holder_rows = holder_data if isinstance(holder_data, list) else (
                     holder_data.get("items", holder_data.get("list", []))
                     if isinstance(holder_data, dict) else []
                 )
-                balances = [number_value(row, "amount", "balance", "quantity")
+                balances = [decimal_value(row, "amount", "balance", "quantity")
                             for row in holder_rows if isinstance(row, dict)]
-                balances = [value for value in balances if value is not None and value >= 0]
-                if supply and supply > 0 and balances:
+                balances = [value for value in balances
+                            if value is not None and value.is_finite() and value >= 0]
+                if (supply and supply > 0 and balances
+                        and token.onchain.top10_wallet_pct is None
+                        and token.onchain.top20_wallet_pct is None
+                        and token.onchain.top20_account_pct is None):
                     balances.sort(reverse=True)
-                    token.onchain.top10_wallet_pct = min(100.0, sum(balances[:10]) / supply * 100)
-                    token.onchain.top20_wallet_pct = min(100.0, sum(balances[:20]) / supply * 100)
+                    token.onchain.top10_wallet_pct = float(min(
+                        Decimal("100"), sum(balances[:10]) / supply * 100
+                    ))
+                    token.onchain.top20_wallet_pct = float(min(
+                        Decimal("100"), sum(balances[:20]) / supply * 100
+                    ))
+                    token.onchain.holder_concentration_source = (
+                        holders.get("provider") if isinstance(holders, dict) else None
+                    ) or "solscan_holders"
                     token.onchain.data_available = True
 
         except Exception as e:

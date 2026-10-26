@@ -48,7 +48,13 @@ class CrimePumpAlert(BaseModel):
     liquidity: float = 0.0
     oi_to_mcap_ratio: float = 0.0
     funding_rate: float = 0.0
-    top10_wallet_concentration: float = 0.0
+    top10_wallet_concentration: Optional[float] = None
+    holder_concentration_pct: Optional[float] = None
+    holder_concentration_label: Optional[str] = None
+    holder_concentration_source: Optional[str] = None
+    holder_distribution_verified: bool = False
+    holder_count: Optional[int] = None
+    top_holders: list[dict] = Field(default_factory=list)
     primary_exchange: Optional[str] = None
 
     # Output

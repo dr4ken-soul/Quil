@@ -70,8 +70,33 @@ def format_crime_pump_alert(alert: CrimePumpAlert) -> str:
         lines.append(f"  OI/MCap: {alert.oi_to_mcap_ratio:.2f}")
     if alert.funding_rate != 0:
         lines.append(f"  Funding Rate: {alert.funding_rate * 100:.2f}%")
-    if alert.top10_wallet_concentration > 0:
-        lines.append(f"  Top 10 Wallets: {alert.top10_wallet_concentration:.1f}%")
+    if (alert.holder_concentration_pct is not None
+            and alert.holder_concentration_label):
+        lines.append(
+            f"  {alert.holder_concentration_label}: "
+            f"{alert.holder_concentration_pct:.1f}% of supply"
+        )
+    if alert.holder_concentration_source:
+        source_label = alert.holder_concentration_source.replace("_", " ").title()
+        if alert.holder_distribution_verified:
+            count = alert.holder_count or 0
+            lines.append(
+                f"  Holder check: verified, {count:,} wallets sum to total supply "
+                f"({source_label})"
+            )
+            if alert.top_holders:
+                lines.append("  Top wallets by supply share:")
+                for index, holder in enumerate(alert.top_holders[:20], 1):
+                    address = str(holder.get("address", ""))
+                    try:
+                        percentage = float(holder.get("percentage"))
+                    except (TypeError, ValueError):
+                        continue
+                    lines.append(f"    {index}. {address}  {percentage:.2f}%")
+        else:
+            lines.append(
+                f"  Holder source: {source_label}; full wallet breakdown not verified"
+            )
     if alert.primary_exchange:
         lines.append(f"  Primary Exchange: {alert.primary_exchange.title()}")
 
@@ -120,7 +145,51 @@ def format_refreshed_alert(alert: CrimePumpAlert) -> str:
     return "\n".join(lines)
 
 
-def format_trade_analysis(signal: TradeSignal) -> str:
+def format_holder_distribution(token) -> str:
+    """Show the strongest available holder evidence without implying false completeness."""
+    lines = ["Holder Distribution:"]
+    source = token.onchain.holder_concentration_source
+    if source:
+        lines.append(f"  Source: {source.replace('_', ' ').title()}")
+
+    if token.onchain.holder_distribution_verified:
+        count = token.onchain.unique_holders or 0
+        lines.append(
+            f"  Verified: {count:,} wallets reconcile exactly to total mint supply"
+        )
+        if token.onchain.top_holders:
+            lines.append("  Top wallets by supply share:")
+            for index, holder in enumerate(token.onchain.top_holders[:20], 1):
+                address = str(holder.get("address", ""))
+                try:
+                    percentage = float(holder.get("percentage"))
+                except (TypeError, ValueError):
+                    continue
+                lines.append(f"    {index}. {address}  {percentage:.2f}%")
+    else:
+        if token.onchain.top10_wallet_pct is not None:
+            percentage = token.onchain.top10_wallet_pct
+            label = "Top 10 wallets"
+        elif token.onchain.top20_wallet_pct is not None:
+            percentage = token.onchain.top20_wallet_pct
+            label = "Top 20 wallets"
+        elif token.onchain.top20_account_pct is not None:
+            percentage = token.onchain.top20_account_pct
+            label = "Top 20 token accounts (lower bound)"
+        else:
+            percentage = None
+            label = None
+
+        if percentage is None:
+            lines.append("  Status: unavailable; holder concentration is unknown")
+        else:
+            lines.append(f"  Available metric: {label} hold {percentage:.2f}% of supply")
+            lines.append("  Full owner-level wallet breakdown was not verified")
+
+    return "\n".join(lines)
+
+
+def format_trade_analysis(signal: TradeSignal, token=None) -> str:
     """
     Format a complete trade analysis for Telegram output.
     Includes direction, entry/SL/TP, leverage, position size,
@@ -216,6 +285,10 @@ def format_trade_analysis(signal: TradeSignal) -> str:
         for os_sig in signal.onchain_signals[:3]:  # Limit to 3
             lines.append(f"  {os_sig.get('name', 'Signal')}: "
                         f"{os_sig.get('observation', '')}")
+
+    if token is not None:
+        lines.append("")
+        lines.append(format_holder_distribution(token))
 
     # Market structure
     if signal.market_structure_summary:

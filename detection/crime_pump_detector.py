@@ -139,6 +139,19 @@ class CrimePumpDetector:
         # Classify lifecycle stage
         lifecycle_result = self.lifecycle.classify_stage(token, valid_results)
 
+        if token.onchain.top10_wallet_pct is not None:
+            holder_pct = token.onchain.top10_wallet_pct
+            holder_label = "Top 10 wallets"
+        elif token.onchain.top20_wallet_pct is not None:
+            holder_pct = token.onchain.top20_wallet_pct
+            holder_label = "Top 20 wallets"
+        elif token.onchain.top20_account_pct is not None:
+            holder_pct = token.onchain.top20_account_pct
+            holder_label = "Top 20 token accounts (lower bound)"
+        else:
+            holder_pct = None
+            holder_label = None
+
         # Build the alert
         alert = CrimePumpAlert(
             token_symbol=token.symbol,
@@ -154,7 +167,13 @@ class CrimePumpDetector:
             liquidity=token.metrics.liquidity_usd,
             oi_to_mcap_ratio=token.derivatives.oi_to_mcap_ratio,
             funding_rate=token.derivatives.funding_rate,
-            top10_wallet_concentration=token.onchain.top10_wallet_pct or 0.0,
+            top10_wallet_concentration=token.onchain.top10_wallet_pct,
+            holder_concentration_pct=holder_pct,
+            holder_concentration_label=holder_label,
+            holder_concentration_source=token.onchain.holder_concentration_source,
+            holder_distribution_verified=token.onchain.holder_distribution_verified,
+            holder_count=token.onchain.unique_holders,
+            top_holders=token.onchain.top_holders,
             primary_exchange=token.exchange_presence.primary_spot_exchange,
             is_refresh=is_refresh,
         )

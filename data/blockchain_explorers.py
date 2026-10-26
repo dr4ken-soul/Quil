@@ -7,10 +7,21 @@ Critical for Layer 1 on-chain supply control detection.
 """
 
 import httpx
+import asyncio
+import sqlite3
+import time
 from typing import Optional
 from datetime import datetime, timedelta
 from utils.logger import get_logger
-from config.settings import ETHERSCAN_API_KEY, BSCSCAN_API_KEY, SOLSCAN_API_KEY
+from config.settings import (
+    DATA_DIR,
+    ETHERSCAN_API_KEY,
+    BSCSCAN_API_KEY,
+    SOLSCAN_API_KEY,
+    SOLSCAN_API_KEY_2,
+    HELIUS_API_KEY,
+    SHYFT_API_KEY,
+)
 
 log = get_logger("blockchain_explorers")
 
@@ -28,6 +39,9 @@ class EVMExplorerClient:
         self.chain_name = chain_name
         self.chain_id = chain_id
         self._client: Optional[httpx.AsyncClient] = None
+        self._holder_cache: dict[str, tuple[float, list[dict]]] = {}
+        self._holder_index_locks: dict[str, asyncio.Lock] = {}
+        self._holder_index_path = DATA_DIR / "evm_holder_index.sqlite3"
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -62,27 +76,50 @@ class EVMExplorerClient:
 
     async def get_token_transfers(self, contract_address: str,
                                    start_block: int = 0, page: int = 1,
-                                   offset: int = 100) -> list[dict]:
+                                   offset: int = 100, sort: str = "desc",
+                                   end_block: Optional[int] = None) -> list[dict]:
         """Get ERC20 token transfer events for a contract."""
-        data = await self._request({
+        data = await self._token_transfer_page(
+            contract_address, start_block, page, offset, sort, end_block
+        )
+        return data or []
+
+    async def _token_transfer_page(self, contract_address: str,
+                                   start_block: int, page: int, offset: int,
+                                   sort: str = "asc",
+                                   end_block: Optional[int] = None) -> Optional[list[dict]]:
+        params = {
             "module": "account",
             "action": "tokentx",
             "contractaddress": contract_address,
             "startblock": start_block,
             "page": page,
             "offset": offset,
-            "sort": "desc",
-        })
-        if data and data.get("result"):
-            return data["result"] if isinstance(data["result"], list) else []
-        return []
+            "sort": sort,
+        }
+        if end_block is not None:
+            params["endblock"] = end_block
+        data = await self._request(params)
+        if not isinstance(data, dict):
+            return None
+        result = data.get("result")
+        if isinstance(result, list):
+            return result
+        if data.get("message") == "No transactions found":
+            return []
+        return None
 
     async def get_token_holders(self, contract_address: str, page: int = 1,
                                  offset: int = 100) -> list[dict]:
         """
-        Get top token holders.
-        Note: This endpoint may not be available on all explorer free tiers.
+        Get top token holders from the explorer, or reconstruct balances from
+        the contract's complete ERC-20 Transfer event history when restricted.
         """
+        cache_key = contract_address.lower()
+        cached = self._holder_cache.get(cache_key)
+        if cached and time.monotonic() - cached[0] < 180:
+            return cached[1]
+
         data = await self._request({
             "module": "token",
             "action": "tokenholderlist",
@@ -90,9 +127,226 @@ class EVMExplorerClient:
             "page": page,
             "offset": offset,
         })
-        if data and data.get("result"):
-            return data["result"] if isinstance(data["result"], list) else []
+        if data and isinstance(data.get("result"), list) and data["result"]:
+            holders = data["result"]
+            self._holder_cache[cache_key] = (time.monotonic(), holders)
+            return holders
+
+        holders = await self._indexed_token_holders(contract_address)
+        if holders is not None:
+            self._holder_cache[cache_key] = (time.monotonic(), holders)
+            return holders
         return []
+
+    def _open_holder_index(self) -> sqlite3.Connection:
+        """Open the persistent event/balance index used when holder APIs are gated."""
+        connection = sqlite3.connect(self._holder_index_path, timeout=30)
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS evm_holder_index_state (
+                chain_id TEXT NOT NULL,
+                contract TEXT NOT NULL,
+                last_complete_block INTEGER NOT NULL DEFAULT -1,
+                scan_start_block INTEGER NOT NULL DEFAULT 0,
+                scan_end_block INTEGER,
+                next_page INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (chain_id, contract)
+            )
+        """)
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS evm_holder_events (
+                chain_id TEXT NOT NULL,
+                contract TEXT NOT NULL,
+                tx_hash TEXT NOT NULL,
+                log_index TEXT NOT NULL,
+                PRIMARY KEY (chain_id, contract, tx_hash, log_index)
+            )
+        """)
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS evm_holder_balances (
+                chain_id TEXT NOT NULL,
+                contract TEXT NOT NULL,
+                address TEXT NOT NULL,
+                raw_balance TEXT NOT NULL,
+                PRIMARY KEY (chain_id, contract, address)
+            )
+        """)
+        connection.commit()
+        return connection
+
+    async def _latest_block_number(self) -> Optional[int]:
+        data = await self._request({"module": "proxy", "action": "eth_blockNumber"})
+        value = data.get("result") if isinstance(data, dict) else None
+        try:
+            return int(value, 16) if isinstance(value, str) and value.startswith("0x") else int(value)
+        except (ValueError, TypeError):
+            return None
+
+    async def _indexed_token_holders(self, contract_address: str,
+                                     page_limit: int = 100) -> Optional[list[dict]]:
+        """Persistently rebuild EVM token balances from every Transfer event.
+
+        The holder-list API is API-PRO on some chains/plans. This indexer
+        checkpoints each page, deduplicates events, and refuses to publish a
+        concentration until the full historical scan and supply reconciliation
+        have completed.
+        """
+        if self.chain_id is None:
+            return None
+        key = contract_address.lower()
+        lock = self._holder_index_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            connection = self._open_holder_index()
+            chain_key = str(self.chain_id)
+            try:
+                connection.execute(
+                    "INSERT OR IGNORE INTO evm_holder_index_state "
+                    "(chain_id, contract) VALUES (?, ?)",
+                    (chain_key, key),
+                )
+                connection.commit()
+                state = connection.execute(
+                    "SELECT last_complete_block, scan_start_block, scan_end_block, next_page "
+                    "FROM evm_holder_index_state WHERE chain_id=? AND contract=?",
+                    (chain_key, key),
+                ).fetchone()
+                last_complete, scan_start, scan_end, page = state
+
+                if scan_end is None:
+                    latest = await self._latest_block_number()
+                    if latest is None:
+                        log.warning("holder_index_tip_unavailable", chain=self.chain_name,
+                                    contract=key)
+                        return None
+                    # Re-scan a short overlap so a late event or shallow reorg
+                    # cannot silently leave the persisted balances stale.
+                    scan_start = max(0, last_complete - 12) if last_complete >= 0 else 0
+                    scan_end = latest
+                    page = 1
+                    connection.execute(
+                        "UPDATE evm_holder_index_state SET scan_start_block=?, "
+                        "scan_end_block=?, next_page=1 WHERE chain_id=? AND contract=?",
+                        (scan_start, scan_end, chain_key, key),
+                    )
+                    connection.commit()
+
+                page_size = 1000
+                pages_done = 0
+                complete = False
+                while pages_done < page_limit:
+                    rows = await self._token_transfer_page(
+                        contract_address, scan_start, page, page_size,
+                        sort="asc", end_block=scan_end,
+                    )
+                    if rows is None:
+                        log.warning("holder_index_page_failed", chain=self.chain_name,
+                                    contract=key, page=page)
+                        return None
+
+                    parsed_events = []
+                    for row in rows:
+                        if not isinstance(row, dict):
+                            return None
+                        tx_hash = row.get("hash") or row.get("transactionHash")
+                        log_index = row.get("logIndex")
+                        sender = str(row.get("from") or "").lower()
+                        recipient = str(row.get("to") or "").lower()
+                        try:
+                            raw_value = int(str(row.get("value")))
+                            log_number = int(str(log_index), 16) if str(log_index).startswith("0x") else int(str(log_index))
+                            int(str(row.get("blockNumber")), 16) if str(row.get("blockNumber")).startswith("0x") else int(str(row.get("blockNumber")))
+                        except (ValueError, TypeError):
+                            return None
+                        if not tx_hash or log_index is None or not sender or not recipient or raw_value < 0:
+                            return None
+                        parsed_events.append((str(tx_hash).lower(), str(log_number), sender,
+                                              recipient, raw_value))
+
+                    try:
+                        connection.execute("BEGIN")
+                        deltas: dict[str, int] = {}
+                        for tx_hash, log_number, sender, recipient, raw_value in parsed_events:
+                            inserted = connection.execute(
+                                "INSERT OR IGNORE INTO evm_holder_events "
+                                "(chain_id, contract, tx_hash, log_index) VALUES (?, ?, ?, ?)",
+                                (chain_key, key, tx_hash, log_number),
+                            ).rowcount
+                            if not inserted:
+                                continue
+                            if sender != "0x0000000000000000000000000000000000000000":
+                                deltas[sender] = deltas.get(sender, 0) - raw_value
+                            if recipient != "0x0000000000000000000000000000000000000000":
+                                deltas[recipient] = deltas.get(recipient, 0) + raw_value
+
+                        for address, delta in deltas.items():
+                            existing = connection.execute(
+                                "SELECT raw_balance FROM evm_holder_balances "
+                                "WHERE chain_id=? AND contract=? AND address=?",
+                                (chain_key, key, address),
+                            ).fetchone()
+                            balance = (int(existing[0]) if existing else 0) + delta
+                            if balance < 0:
+                                raise ValueError("transfer history produced a negative balance")
+                            connection.execute(
+                                "INSERT INTO evm_holder_balances "
+                                "(chain_id, contract, address, raw_balance) VALUES (?, ?, ?, ?) "
+                                "ON CONFLICT(chain_id, contract, address) DO UPDATE SET "
+                                "raw_balance=excluded.raw_balance",
+                                (chain_key, key, address, str(balance)),
+                            )
+
+                        if len(rows) < page_size:
+                            connection.execute(
+                                "UPDATE evm_holder_index_state SET last_complete_block=?, "
+                                "scan_start_block=?, scan_end_block=NULL, next_page=1 "
+                                "WHERE chain_id=? AND contract=?",
+                                (scan_end, max(0, scan_end - 12), chain_key, key),
+                            )
+                            complete = True
+                        else:
+                            connection.execute(
+                                "UPDATE evm_holder_index_state SET next_page=? "
+                                "WHERE chain_id=? AND contract=?",
+                                (page + 1, chain_key, key),
+                            )
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
+
+                    pages_done += 1
+                    if complete:
+                        break
+                    page += 1
+
+                if not complete:
+                    log.info("holder_index_backfill_pending", chain=self.chain_name,
+                             contract=key, pages_indexed=pages_done)
+                    return None
+
+                supply = await self.get_token_supply(contract_address)
+                if supply is None or supply <= 0:
+                    return None
+                balances = connection.execute(
+                    "SELECT address, raw_balance FROM evm_holder_balances "
+                    "WHERE chain_id=? AND contract=?",
+                    (chain_key, key),
+                ).fetchall()
+                positive = [(address, int(balance)) for address, balance in balances
+                            if int(balance) > 0]
+                if sum(balance for _, balance in positive) != supply:
+                    log.warning("holder_index_supply_mismatch", chain=self.chain_name,
+                                contract=key, indexed_supply=sum(v for _, v in positive),
+                                api_supply=supply)
+                    return None
+                positive.sort(key=lambda item: item[1], reverse=True)
+                holders = [{"address": address, "TokenHolderQuantity": str(balance)}
+                           for address, balance in positive[:100]]
+                log.info("holder_index_complete", chain=self.chain_name,
+                         contract=key, holder_count=len(positive), pages_indexed=pages_done)
+                return holders
+            finally:
+                connection.close()
 
     async def get_token_supply(self, contract_address: str) -> Optional[int]:
         """Get raw ERC-20 total supply for holder-concentration calculations."""
@@ -292,50 +546,467 @@ class SolscanClient:
     def __init__(self):
         self.base_url = "https://pro-api.solscan.io/v2.0"
         self.api_key = SOLSCAN_API_KEY
+        self.api_keys = tuple(dict.fromkeys(
+            key for key in (SOLSCAN_API_KEY, SOLSCAN_API_KEY_2) if key
+        ))
+        self.helius_api_key = HELIUS_API_KEY
+        self.shyft_api_key = SHYFT_API_KEY
         self._client: Optional[httpx.AsyncClient] = None
+        self._holder_cache: dict[tuple[str, int, int], tuple[float, dict]] = {}
+        self._meta_cache: dict[str, tuple[float, dict]] = {}
+        self._cache_ttl_seconds = 180
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
                 timeout=30.0,
-                headers={
-                    "Accept": "application/json",
-                    "Token": self.api_key,
-                },
+                headers={"Accept": "application/json"},
             )
         return self._client
 
     async def _request(self, endpoint: str, params: dict = None) -> Optional[dict]:
-        """Make an authenticated request to Solscan."""
-        if not self.api_key:
+        """Call Solscan, rotating to the second configured key on provider errors."""
+        if not self.api_keys:
             log.warning("solscan_no_key", message="No Solscan API key configured")
             return None
 
+        client = await self._get_client()
+        for key_number, api_key in enumerate(self.api_keys, start=1):
+            try:
+                response = await client.get(
+                    f"{self.base_url}{endpoint}",
+                    params=params,
+                    headers={"token": api_key},
+                )
+                response.raise_for_status()
+                return response.json()
+            except httpx.HTTPStatusError as e:
+                # Never log request URLs or headers because they may contain credentials.
+                status = e.response.status_code
+                log.warning("solscan_http_error", status=status,
+                            endpoint=endpoint, key_number=key_number,
+                            response=e.response.text[:300])
+                retryable = status in (401, 402, 403, 408, 429) or status >= 500
+                if not retryable or key_number == len(self.api_keys):
+                    return None
+            except Exception as e:
+                log.warning("solscan_error", error=type(e).__name__,
+                            endpoint=endpoint, key_number=key_number)
+                if key_number == len(self.api_keys):
+                    return None
+        return None
+
+    async def _rpc_request(self, provider: str, api_key: str, method: str,
+                           params: list) -> Optional[dict]:
+        """Call a Solana JSON-RPC provider without logging its credential URL."""
+        if not api_key and provider != "solana_rpc":
+            return None
+
+        if provider == "helius":
+            url = "https://mainnet.helius-rpc.com/"
+            query = {"api-key": api_key}
+        elif provider == "solana_rpc":
+            url = "https://api.mainnet.solana.com"
+            query = {}
+        else:
+            url = "https://rpc.shyft.to/"
+            query = {"api_key": api_key}
+
         try:
             client = await self._get_client()
-            response = await client.get(f"{self.base_url}{endpoint}", params=params)
+            response = await client.post(
+                url,
+                params=query,
+                json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+                timeout=45.0,
+            )
             response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            log.error("solscan_error", error=str(e), endpoint=endpoint)
+            payload = response.json()
+            if payload.get("error"):
+                log.warning("solana_fallback_rpc_error", provider=provider,
+                            method=method, detail=str(payload["error"])[:300])
+                return None
+            return payload.get("result")
+        except httpx.HTTPStatusError as e:
+            log.warning("solana_fallback_http_error", provider=provider,
+                        method=method, status=e.response.status_code,
+                        response=e.response.text[:300])
             return None
+        except Exception as e:
+            log.warning("solana_fallback_error", provider=provider,
+                        method=method, error=type(e).__name__)
+            return None
+
+    @staticmethod
+    def _extract_holder_rows(payload: Optional[dict]) -> list[dict]:
+        if not isinstance(payload, dict):
+            return []
+        data = payload.get("data", payload)
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            for key in ("items", "list", "token_accounts"):
+                rows = data.get(key)
+                if isinstance(rows, list):
+                    return rows
+        return []
+
+    @staticmethod
+    def _account_amount(row: dict) -> Optional[int]:
+        amount = row.get("amount")
+        if amount is None:
+            amount = (row.get("tokenAmount") or {}).get("amount")
+        if amount is None:
+            parsed = ((row.get("account") or {}).get("data") or {}).get("parsed") or {}
+            info = parsed.get("info") or {}
+            amount = (info.get("tokenAmount") or {}).get("amount")
+        try:
+            return int(str(amount)) if amount is not None else None
+        except (ValueError, TypeError):
+            return None
+
+    @classmethod
+    def _aggregate_accounts(cls, accounts: list[dict]) -> Optional[dict]:
+        """Aggregate token accounts by owner, so top-holder ratios count wallets."""
+        totals: dict[str, int] = {}
+        for row in accounts:
+            if not isinstance(row, dict):
+                return None
+            parsed = ((row.get("account") or {}).get("data") or {}).get("parsed") or {}
+            info = parsed.get("info") or {}
+            # Helius puts the wallet owner at row["owner"]. Standard
+            # getProgramAccounts responses (such as Shyft's) put the program
+            # id there and the wallet owner under parsed.info.owner.
+            owner = info.get("owner") or row.get("token_owner") or row.get("owner")
+            amount = cls._account_amount(row)
+            if not owner or amount is None or amount < 0:
+                # Returning partial totals would understate concentration.
+                return None
+            totals[owner] = totals.get(owner, 0) + amount
+
+        holders = [{"address": owner, "amount": amount}
+                   for owner, amount in totals.items() if amount > 0]
+        holders.sort(key=lambda row: row["amount"], reverse=True)
+        return {"data": {"items": holders}}
+
+    @staticmethod
+    def _aggregate_solscan_holders(rows: list[dict]) -> Optional[dict]:
+        """Solscan returns token-account addresses; combine them by wallet owner."""
+        totals: dict[str, int] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                return None
+            owner = row.get("owner")
+            amount = row.get("amount_str", row.get("amount"))
+            try:
+                amount = int(str(amount)) if amount is not None else None
+            except (ValueError, TypeError):
+                return None
+            if not owner or amount is None or amount < 0:
+                return None
+            totals[owner] = totals.get(owner, 0) + amount
+
+        holders = [{"address": owner, "amount": amount}
+                   for owner, amount in totals.items()]
+        holders.sort(key=lambda row: row["amount"], reverse=True)
+        return {"data": {"items": holders}}
+
+    @staticmethod
+    def _add_wallet_concentration(aggregated: Optional[dict],
+                                  raw_supply: Optional[str]) -> Optional[dict]:
+        """Add owner-level shares only after reconciling all balances to supply."""
+        try:
+            supply = int(str(raw_supply))
+            rows = aggregated["data"]["items"]
+            if supply <= 0 or not isinstance(rows, list):
+                return None
+            amounts = sorted((int(row["amount"]) for row in rows), reverse=True)
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not amounts or any(amount < 0 for amount in amounts):
+            return None
+        account_total = sum(amounts)
+        if account_total != supply:
+            log.warning("solana_holder_supply_mismatch",
+                        owner_balance_total=account_total, mint_supply=supply,
+                        difference=supply - account_total)
+            # A partial provider result must never be advertised as the full
+            # wallet distribution. Let the caller try another source.
+            return None
+        aggregated["data"]["concentration"] = {
+            "top10_wallet_pct": sum(amounts[:10]) / supply * 100,
+            "top20_wallet_pct": sum(amounts[:20]) / supply * 100,
+        }
+        top_holders = aggregated["data"]["items"][:20]
+        aggregated["data"]["top_holders"] = [
+            {
+                "address": row["address"],
+                "percentage": int(row["amount"]) / supply * 100,
+            }
+            for row in top_holders
+        ]
+        aggregated["data"]["holder_count"] = len(amounts)
+        aggregated["data"]["supply_reconciled"] = True
+        return aggregated
+
+    async def _helius_token_holders(self, token_address: str) -> Optional[dict]:
+        """Fetch every page before reporting a complete holder distribution."""
+        if not self.helius_api_key:
+            return None
+
+        limit = 1000
+        page = 1
+        accounts: list[dict] = []
+        seen_addresses: set[str] = set()
+
+        while True:
+            result = await self._rpc_request(
+                "helius", self.helius_api_key, "getTokenAccounts",
+                [{"page": page, "limit": limit, "mint": token_address}],
+            )
+            if not isinstance(result, dict):
+                return None
+            rows = result.get("token_accounts", result.get("items"))
+            if not isinstance(rows, list):
+                return None
+            previous_count = len(accounts)
+            for row in rows:
+                if not isinstance(row, dict):
+                    return None
+                account_id = row.get("address") or row.get("pubkey")
+                if not account_id:
+                    return None
+                if account_id in seen_addresses:
+                    continue
+                seen_addresses.add(account_id)
+                accounts.append(row)
+
+            # Helius paginates until it returns a short/empty page. Its
+            # `total` is not an overall holder count; stopping at 1,000 would
+            # silently truncate tokens with more than one page.
+            if not rows or len(rows) < limit:
+                break
+            if len(accounts) == previous_count:
+                return None
+            page += 1
+
+        log.info("solana_holders_provider", provider="helius",
+                 mint=token_address, token_accounts=len(accounts))
+        aggregated = self._aggregate_accounts(accounts)
+        supply = await self._rpc_token_supply("helius", self.helius_api_key, token_address)
+        supply_data = supply.get("data", {}) if isinstance(supply, dict) else {}
+        aggregated = self._add_wallet_concentration(
+            aggregated, supply_data.get("supply") if isinstance(supply_data, dict) else None
+        )
+        if aggregated is None:
+            return None
+        aggregated["provider"] = "helius"
+        return aggregated
+
+    async def _shyft_token_holders(self, token_address: str) -> Optional[dict]:
+        """Read parsed SPL and Token-2022 accounts, then aggregate by wallet."""
+        if not self.shyft_api_key:
+            return None
+
+        programs = (
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+        )
+        results = await asyncio.gather(*(
+            self._rpc_request(
+                "shyft", self.shyft_api_key, "getProgramAccounts",
+                [program, {
+                    "encoding": "jsonParsed",
+                    "filters": [{"memcmp": {"offset": 0, "bytes": token_address}}],
+                }],
+            ) for program in programs
+        ))
+        if any(not isinstance(result, list) for result in results):
+            return None
+
+        accounts = [row for result in results for row in result]
+        log.info("solana_holders_provider", provider="shyft",
+                 mint=token_address, token_accounts=len(accounts))
+        aggregated = self._aggregate_accounts(accounts)
+        supply = await self._rpc_token_supply("shyft", self.shyft_api_key, token_address)
+        supply_data = supply.get("data", {}) if isinstance(supply, dict) else {}
+        aggregated = self._add_wallet_concentration(
+            aggregated, supply_data.get("supply") if isinstance(supply_data, dict) else None
+        )
+        if aggregated is None:
+            return None
+        aggregated["provider"] = "shyft"
+        return aggregated
 
     async def get_token_holders(self, token_address: str, page: int = 1,
                                  page_size: int = 40) -> Optional[dict]:
-        """Get top holders for an SPL token."""
-        data = await self._request(f"/token/holders", params={
+        """Get a complete holder set; never calculate concentration from one page."""
+        cache_key = (token_address, page, page_size)
+        cached = self._holder_cache.get(cache_key)
+        if cached and time.monotonic() - cached[0] < self._cache_ttl_seconds:
+            return cached[1]
+
+        # Prefer complete account listings. Solscan's aggregate statistic is a
+        # one-call fallback when a full owner-level account scan is unavailable.
+        for provider in (self._helius_token_holders, self._shyft_token_holders):
+            fallback = await provider(token_address)
+            if fallback is not None:
+                self._holder_cache[cache_key] = (time.monotonic(), fallback)
+                return fallback
+
+        fallback = await self._solscan_holder_concentration(token_address)
+        if fallback is not None:
+            self._holder_cache[cache_key] = (time.monotonic(), fallback)
+            return fallback
+
+        fallback = await self._solscan_top20_accounts(token_address)
+        if fallback is not None:
+            self._holder_cache[cache_key] = (time.monotonic(), fallback)
+            return fallback
+
+        fallback = await self._solana_rpc_holder_concentration(token_address)
+        if fallback is not None:
+            self._holder_cache[cache_key] = (time.monotonic(), fallback)
+            return fallback
+
+        log.error("solana_complete_holder_data_unavailable", mint=token_address,
+                  providers=("helius", "shyft", "solscan", "solana_rpc"))
+        return None
+
+    async def _solscan_holder_concentration(self, token_address: str) -> Optional[dict]:
+        """Use Solscan's provider-calculated top-20 supply concentration metric."""
+        if not self.api_keys:
+            return None
+        payload = await self._request("/token/statistic", params={
             "address": token_address,
-            "page": page,
-            "page_size": page_size,
         })
-        return data
+        body = payload.get("data") if isinstance(payload, dict) else None
+        top20 = body.get("holder_top_20_balance_pct") if isinstance(body, dict) else None
+        try:
+            top20 = float(top20)
+        except (ValueError, TypeError):
+            return None
+        if not 0 <= top20 <= 100:
+            return None
+        log.info("solana_holder_concentration_provider", provider="solscan_statistic",
+                 mint=token_address, top20_holder_pct=top20)
+        return {
+            "provider": "solscan_statistic",
+            "data": {"items": [], "concentration": {
+                "top20_wallet_pct": top20,
+            }},
+        }
+
+    async def _solscan_top20_accounts(self, token_address: str) -> Optional[dict]:
+        """Fallback to Solscan's ranked top-20 token-account share."""
+        if not self.api_keys:
+            return None
+        payload = await self._request("/token/holders", params={
+            "address": token_address,
+            "page": 1,
+            "page_size": 20,
+        })
+        body = payload.get("data") if isinstance(payload, dict) else None
+        rows = body.get("items") if isinstance(body, dict) else None
+        if not isinstance(rows, list) or not rows:
+            return None
+        try:
+            total = int(body.get("total", len(rows)))
+            if total > len(rows):
+                return None
+            percentages = [float(row["percentage"]) for row in rows
+                           if isinstance(row, dict) and row.get("percentage") is not None]
+        except (TypeError, ValueError, KeyError):
+            return None
+        if len(percentages) != len(rows):
+            return None
+        top20_account_pct = sum(percentages)
+        if not 0 <= top20_account_pct <= 100:
+            return None
+        log.info("solana_holder_concentration_provider", provider="solscan_top20_accounts",
+                 mint=token_address, top20_account_pct=top20_account_pct)
+        return {
+            "provider": "solscan_top20_accounts",
+            "data": {"items": [], "concentration": {
+                "top20_account_pct": top20_account_pct,
+            }},
+        }
+
+    async def _solana_rpc_holder_concentration(self, token_address: str) -> Optional[dict]:
+        """Last-resort, no-key estimate from Solana's 20 largest token accounts."""
+        largest_result = await self._rpc_request(
+            "solana_rpc", "", "getTokenLargestAccounts",
+            [token_address, {"commitment": "finalized"}],
+        )
+        context = largest_result.get("context", {}) if isinstance(largest_result, dict) else {}
+        supply_config = {"commitment": "finalized"}
+        if isinstance(context, dict) and context.get("slot") is not None:
+            supply_config["minContextSlot"] = context["slot"]
+        supply_result = await self._rpc_request(
+            "solana_rpc", "", "getTokenSupply", [token_address, supply_config],
+        )
+        supply_value = supply_result.get("value") if isinstance(supply_result, dict) else None
+        largest = largest_result.get("value") if isinstance(largest_result, dict) else None
+        if not isinstance(supply_value, dict) or not isinstance(largest, list):
+            return None
+        try:
+            supply = int(str(supply_value.get("amount")))
+            amounts = [int(str(row.get("amount"))) for row in largest
+                       if isinstance(row, dict) and row.get("amount") is not None]
+        except (TypeError, ValueError):
+            return None
+        if supply <= 0 or not amounts or any(amount < 0 for amount in amounts):
+            return None
+        top20_account_pct = sum(sorted(amounts, reverse=True)[:20]) / supply * 100
+        if not 0 <= top20_account_pct <= 100:
+            return None
+        log.info("solana_holder_concentration_provider", provider="solana_rpc_top20_accounts",
+                 mint=token_address, top20_account_pct=top20_account_pct)
+        return {
+            "provider": "solana_rpc_top20_accounts",
+            "data": {"items": [], "concentration": {
+                "top20_account_pct": top20_account_pct,
+            }},
+        }
+
+    async def _rpc_token_supply(self, provider: str, api_key: str,
+                                token_address: str) -> Optional[dict]:
+        result = await self._rpc_request(
+            provider, api_key, "getTokenSupply", [token_address]
+        )
+        value = result.get("value") if isinstance(result, dict) else None
+        if not isinstance(value, dict) or value.get("amount") is None:
+            return None
+        return {"data": {
+            "supply": value["amount"],
+            "decimals": value.get("decimals"),
+        }}
 
     async def get_token_meta(self, token_address: str) -> Optional[dict]:
-        """Get token metadata (name, symbol, supply, decimals)."""
+        """Get token supply from Solscan, Helius, or Shyft in that order."""
+        cached = self._meta_cache.get(token_address)
+        if cached and time.monotonic() - cached[0] < self._cache_ttl_seconds:
+            return cached[1]
+
         data = await self._request(f"/token/meta", params={
             "address": token_address,
         })
-        return data
+        meta = data.get("data", data) if isinstance(data, dict) else {}
+        if isinstance(meta, dict) and any(
+            meta.get(key) is not None for key in ("supply", "totalSupply", "total_supply")
+        ):
+            self._meta_cache[token_address] = (time.monotonic(), data)
+            return data
+
+        if not self.api_keys:
+            log.warning("solscan_no_key", message="No Solscan API key configured")
+        for provider, api_key in (("helius", self.helius_api_key),
+                                  ("shyft", self.shyft_api_key)):
+            fallback = await self._rpc_token_supply(provider, api_key, token_address)
+            if fallback is not None:
+                self._meta_cache[token_address] = (time.monotonic(), fallback)
+                return fallback
+        return None
 
     async def get_token_transfer(self, token_address: str, page: int = 1,
                                   page_size: int = 40) -> Optional[dict]:

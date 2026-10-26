@@ -1107,10 +1107,22 @@ class SignalAggregator:
         """Collect relevant on-chain signals."""
         signals = []
 
-        if token.onchain.top10_wallet_pct > 50:
+        concentration_pct = (
+            token.onchain.top10_wallet_pct
+            if token.onchain.top10_wallet_pct is not None
+            else token.onchain.top20_wallet_pct
+            if token.onchain.top20_wallet_pct is not None
+            else token.onchain.top20_account_pct
+        )
+        concentration_label = (
+            "Top 10 wallets" if token.onchain.top10_wallet_pct is not None
+            else "Top 20 wallets" if token.onchain.top20_wallet_pct is not None
+            else "Top 20 token accounts (lower bound)"
+        )
+        if concentration_pct is not None and concentration_pct > 50:
             signals.append({
-                "name": "Wallet Concentration",
-                "observation": f"Top 10 wallets hold {token.onchain.top10_wallet_pct:.1f}%",
+                "name": "Supply Concentration",
+                "observation": f"{concentration_label} hold {concentration_pct:.1f}%",
             })
 
         if token.onchain.contract_age_days is not None and token.onchain.contract_age_days > 0 and token.onchain.contract_age_days < 30:
@@ -1119,7 +1131,8 @@ class SignalAggregator:
                 "observation": f"Contract is {token.onchain.contract_age_days} days old",
             })
 
-        if token.onchain.cold_wallet_outflows_24h > 100_000:
+        if (token.onchain.cold_wallet_outflows_24h is not None
+                and token.onchain.cold_wallet_outflows_24h > 100_000):
             signals.append({
                 "name": "Cold Wallet Outflows",
                 "observation": f"${token.onchain.cold_wallet_outflows_24h:,.0f} withdrawn in 24h",

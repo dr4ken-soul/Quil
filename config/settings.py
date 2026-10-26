@@ -24,6 +24,9 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY", "")
 BSCSCAN_API_KEY = os.getenv("BSCSCAN_API_KEY", "")
 SOLSCAN_API_KEY = os.getenv("SOLSCAN_API_KEY", "")
+SOLSCAN_API_KEY_2 = os.getenv("SOLSCAN_API_KEY_2", "")
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "")
+SHYFT_API_KEY = os.getenv("SHYFT_API_KEY", "")
 
 # ── Market Data Keys ─────────────────────────────────────────────────────────
 COINGLASS_API_KEY = os.getenv("COINGLASS_API_KEY", "")
