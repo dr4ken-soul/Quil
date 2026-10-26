@@ -20,7 +20,11 @@ from config.settings import (
     SOLSCAN_API_KEY,
     SOLSCAN_API_KEY_2,
     HELIUS_API_KEY,
+    HELIUS_API_KEY_2,
+    HELIUS_API_KEY_3,
     SHYFT_API_KEY,
+    QUICKNODE_SOLANA_RPC_URL,
+    ALCHEMY_SOLANA_API_KEY,
 )
 
 log = get_logger("blockchain_explorers")
@@ -550,7 +554,12 @@ class SolscanClient:
             key for key in (SOLSCAN_API_KEY, SOLSCAN_API_KEY_2) if key
         ))
         self.helius_api_key = HELIUS_API_KEY
+        self.helius_api_keys = tuple(dict.fromkeys(
+            key for key in (HELIUS_API_KEY, HELIUS_API_KEY_2, HELIUS_API_KEY_3) if key
+        ))
         self.shyft_api_key = SHYFT_API_KEY
+        self.quicknode_rpc_url = QUICKNODE_SOLANA_RPC_URL
+        self.alchemy_api_key = ALCHEMY_SOLANA_API_KEY
         self._client: Optional[httpx.AsyncClient] = None
         self._holder_cache: dict[tuple[str, int, int], tuple[float, dict]] = {}
         self._meta_cache: dict[str, tuple[float, dict]] = {}
@@ -607,6 +616,12 @@ class SolscanClient:
             query = {"api-key": api_key}
         elif provider == "solana_rpc":
             url = "https://api.mainnet.solana.com"
+            query = {}
+        elif provider == "quicknode":
+            url = api_key
+            query = {}
+        elif provider == "alchemy":
+            url = f"https://solana-mainnet.g.alchemy.com/v2/{api_key}"
             query = {}
         else:
             url = "https://rpc.shyft.to/"
@@ -750,9 +765,19 @@ class SolscanClient:
         return aggregated
 
     async def _helius_token_holders(self, token_address: str) -> Optional[dict]:
-        """Fetch every page before reporting a complete holder distribution."""
-        if not self.helius_api_key:
-            return None
+        """Try configured Helius keys in order, accepting only a full snapshot."""
+        for key_number, api_key in enumerate(self.helius_api_keys, start=1):
+            result = await self._helius_token_holders_with_key(token_address, api_key)
+            if result is not None:
+                result["provider"] = "helius"
+                log.info("solana_holders_provider_key_used", provider="helius",
+                         key_number=key_number, mint=token_address)
+                return result
+        return None
+
+    async def _helius_token_holders_with_key(self, token_address: str,
+                                             api_key: str) -> Optional[dict]:
+        """Fetch every Helius page before reporting a complete distribution."""
 
         limit = 1000
         page = 1
@@ -761,7 +786,7 @@ class SolscanClient:
 
         while True:
             result = await self._rpc_request(
-                "helius", self.helius_api_key, "getTokenAccounts",
+                "helius", api_key, "getTokenAccounts",
                 [{"page": page, "limit": limit, "mint": token_address}],
             )
             if not isinstance(result, dict):
@@ -793,14 +818,13 @@ class SolscanClient:
         log.info("solana_holders_provider", provider="helius",
                  mint=token_address, token_accounts=len(accounts))
         aggregated = self._aggregate_accounts(accounts)
-        supply = await self._rpc_token_supply("helius", self.helius_api_key, token_address)
+        supply = await self._rpc_token_supply("helius", api_key, token_address)
         supply_data = supply.get("data", {}) if isinstance(supply, dict) else {}
         aggregated = self._add_wallet_concentration(
             aggregated, supply_data.get("supply") if isinstance(supply_data, dict) else None
         )
         if aggregated is None:
             return None
-        aggregated["provider"] = "helius"
         return aggregated
 
     async def _shyft_token_holders(self, token_address: str) -> Optional[dict]:
@@ -838,6 +862,80 @@ class SolscanClient:
         aggregated["provider"] = "shyft"
         return aggregated
 
+    async def _rpc_program_holders(self, provider: str, api_key: str,
+                                   token_address: str) -> Optional[dict]:
+        """Enumerate all matching SPL and Token-2022 accounts through an RPC."""
+        if not api_key:
+            return None
+
+        programs = (
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+        )
+        accounts: list[dict] = []
+        seen_addresses: set[str] = set()
+        method = "getProgramAccountsV2" if provider == "alchemy" else "getProgramAccounts"
+
+        for program in programs:
+            config = {
+                "encoding": "jsonParsed",
+                "commitment": "finalized",
+                "filters": [{"memcmp": {"offset": 0, "bytes": token_address}}],
+            }
+            previous_cursor = None
+            for _ in range(10000):
+                result = await self._rpc_request(
+                    provider, api_key, method, [program, config.copy()]
+                )
+                if provider == "alchemy":
+                    if not isinstance(result, dict):
+                        return None
+                    rows = result.get("accounts")
+                    cursor = result.get("paginationKey")
+                    if not isinstance(rows, list):
+                        return None
+                else:
+                    rows = result
+                    cursor = None
+                    if not isinstance(rows, list):
+                        # QuickNode may reject oversized non-paginated scans;
+                        # the next provider is then tried by the caller.
+                        return None
+
+                for row in rows:
+                    if not isinstance(row, dict):
+                        return None
+                    address = row.get("pubkey") or row.get("address")
+                    if not address:
+                        return None
+                    if address not in seen_addresses:
+                        seen_addresses.add(address)
+                        accounts.append(row)
+
+                if provider != "alchemy" or cursor is None:
+                    break
+                if not isinstance(cursor, str) or cursor == previous_cursor:
+                    return None
+                previous_cursor = cursor
+                config["paginationKey"] = cursor
+            else:
+                log.warning("solana_holder_rpc_page_limit", provider=provider,
+                            mint=token_address)
+                return None
+
+        log.info("solana_holders_provider", provider=provider,
+                 mint=token_address, token_accounts=len(accounts))
+        aggregated = self._aggregate_accounts(accounts)
+        supply = await self._rpc_token_supply(provider, api_key, token_address)
+        supply_data = supply.get("data", {}) if isinstance(supply, dict) else {}
+        aggregated = self._add_wallet_concentration(
+            aggregated, supply_data.get("supply") if isinstance(supply_data, dict) else None
+        )
+        if aggregated is None:
+            return None
+        aggregated["provider"] = provider
+        return aggregated
+
     async def get_token_holders(self, token_address: str, page: int = 1,
                                  page_size: int = 40) -> Optional[dict]:
         """Get a complete holder set; never calculate concentration from one page."""
@@ -850,6 +948,13 @@ class SolscanClient:
         # one-call fallback when a full owner-level account scan is unavailable.
         for provider in (self._helius_token_holders, self._shyft_token_holders):
             fallback = await provider(token_address)
+            if fallback is not None:
+                self._holder_cache[cache_key] = (time.monotonic(), fallback)
+                return fallback
+
+        for provider, api_key in (("quicknode", self.quicknode_rpc_url),
+                                  ("alchemy", self.alchemy_api_key)):
+            fallback = await self._rpc_program_holders(provider, api_key, token_address)
             if fallback is not None:
                 self._holder_cache[cache_key] = (time.monotonic(), fallback)
                 return fallback
@@ -870,7 +975,7 @@ class SolscanClient:
             return fallback
 
         log.error("solana_complete_holder_data_unavailable", mint=token_address,
-                  providers=("helius", "shyft", "solscan", "solana_rpc"))
+                  providers=("helius", "shyft", "quicknode", "alchemy", "solscan", "solana_rpc"))
         return None
 
     async def _solscan_holder_concentration(self, token_address: str) -> Optional[dict]:
@@ -1000,8 +1105,13 @@ class SolscanClient:
 
         if not self.api_keys:
             log.warning("solscan_no_key", message="No Solscan API key configured")
-        for provider, api_key in (("helius", self.helius_api_key),
-                                  ("shyft", self.shyft_api_key)):
+        supply_providers = [("helius", key) for key in self.helius_api_keys]
+        supply_providers.extend((
+            ("shyft", self.shyft_api_key),
+            ("quicknode", self.quicknode_rpc_url),
+            ("alchemy", self.alchemy_api_key),
+        ))
+        for provider, api_key in supply_providers:
             fallback = await self._rpc_token_supply(provider, api_key, token_address)
             if fallback is not None:
                 self._meta_cache[token_address] = (time.monotonic(), fallback)

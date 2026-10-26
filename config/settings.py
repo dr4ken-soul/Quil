@@ -26,7 +26,11 @@ BSCSCAN_API_KEY = os.getenv("BSCSCAN_API_KEY", "")
 SOLSCAN_API_KEY = os.getenv("SOLSCAN_API_KEY", "")
 SOLSCAN_API_KEY_2 = os.getenv("SOLSCAN_API_KEY_2", "")
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "")
+HELIUS_API_KEY_2 = os.getenv("HELIUS_API_KEY_2", "")
+HELIUS_API_KEY_3 = os.getenv("HELIUS_API_KEY_3", "")
 SHYFT_API_KEY = os.getenv("SHYFT_API_KEY", "")
+QUICKNODE_SOLANA_RPC_URL = os.getenv("QUICKNODE_SOLANA_RPC_URL", "")
+ALCHEMY_SOLANA_API_KEY = os.getenv("ALCHEMY_SOLANA_API_KEY", "")
 
 # ── Market Data Keys ─────────────────────────────────────────────────────────
 COINGLASS_API_KEY = os.getenv("COINGLASS_API_KEY", "")

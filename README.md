@@ -52,13 +52,13 @@ Token Price Resolution (priority order):
 - DexScreener pair prices, volume, liquidity, and venue names are used for DEX market context.
 - CCXT public spot endpoints collect Binance, Bybit, and OKX prices and a Bybit order book when that symbol is listed. This adapter reads market data only; it does not place orders.
 - CoinGlass API v4 supplies current and historical open interest, funding, global and top-trader long/short ratios, liquidations, and liquidation heatmaps. Coverage depends on the token, endpoint, and CoinGlass plan.
-- Solana holder concentration tries complete Helius and Shyft token-account data, then Solscan's provider-calculated top-20 holder share (available only on plans that include the statistic endpoint), then Solscan's ranked top-20 token-account share, then the public Solana RPC's top-20 token-account share. Account-level values are labeled as lower bounds rather than owner-aggregated wallet percentages. Configure `SOLSCAN_API_KEY_2` to retry Solscan after an authentication, quota, or service error.
+- Solana holder concentration tries Helius (up to three configured keys), Shyft, QuickNode, and Alchemy account scans. Helius and Shyft enumerate token accounts; Alchemy uses paginated `getProgramAccountsV2`, while QuickNode uses `getProgramAccounts`. Quil accepts an owner-level distribution as complete only when the scan finishes and balances reconcile to mint supply. If those scans fail, it tries Solscan's provider-calculated top-20 holder share (when the plan allows it), Solscan's ranked top-20 account share, then public Solana RPC's top-20 account share. Account-only estimates are labeled as lower bounds, not full wallet distributions. `SOLSCAN_API_KEY_2` is tried after an authentication, quota, or service error.
 - EVM holder concentration uses the explorer holder-list endpoint when available. If that endpoint is plan-restricted, Quil builds a persistent balance index from ERC-20 transfer events and only uses it after the historical scan is complete.
 - Twitter/X mention metrics are optional and require `TWITTER_BEARER_TOKEN`. Quil does not have a Telegram message-search provider; a missing Telegram count is treated as unknown.
 
 Quil never replaces missing holder data with a fabricated low-concentration score. Solana's public-RPC fallback reports the share held by the 20 largest token accounts, which is a conservative account-level lower bound rather than an owner-aggregated wallet percentage. If every provider/RPC is unavailable, no implementation can truthfully supply a live measurement; the layer records concentration as unknown. The EVM transfer index is stored under `data_store/` and can take repeated scans to finish its first historical backfill for high-activity contracts. Cold-wallet outflows are not available without a provider that identifies exchange-controlled wallets.
 
-`SOLSCAN_API_KEY_2` is a retry key, not pooled capacity. If both keys belong to the same Solscan account or plan, they may hit the same usage limit; Quil then falls through to Helius, Shyft, or public RPC.
+Additional Helius keys are tried in order after an API error, but they do not guarantee extra quota if the keys share the same plan. QuickNode or Alchemy can then provide a separate RPC route when configured. Solscan's second key is also a retry key, not pooled capacity; keys on the same account or plan may share usage limits.
 
 Crime-pump alerts require at least `MIN_LAYERS_CONFIRMED` triggered layers and at least that many evaluable layers. A single-layer result is a watch alert. The crime-pump backtest replays the same four analyzers across historical candles; the candle dataset does not include historical holder balances, funding, or order-book snapshots, so those checks are reported as unevaluable.
 
@@ -67,6 +67,7 @@ Crime-pump alerts require at least `MIN_LAYERS_CONFIRMED` triggered layers and a
 | Command | What It Does |
 |---------|-------------|
 | `/scan [ticker]` | Crime pump analysis (4 detection layers) |
+| `/holders [mint]` | Download a CSV of all Solana wallets when complete data reconciles to mint supply |
 | `/trade [ticker]` | Full trade analysis with entry/SL/TP/leverage + Execute button |
 | `/analyze [ticker]` | Alias for /trade |
 | `/calc [ticker] [amount] [leverage]` | Calculate profit/loss for a trade setup |
@@ -134,8 +135,10 @@ python main.py
 | `ETHERSCAN_API_KEY` | Etherscan V2 on-chain data for Ethereum and BSC; holder lists require an API plan that includes Pro endpoints |
 | `BSCSCAN_API_KEY` | Optional BscScan community-endpoint fallback when no Etherscan V2 key is set |
 | `SOLSCAN_API_KEY` | Primary Solana on-chain data provider |
-| `HELIUS_API_KEY` | Optional full Solana holder/supply fallback after Solscan fails |
-| `SHYFT_API_KEY` | Optional Solana RPC holder/supply fallback after Helius fails |
+| `HELIUS_API_KEY`, `HELIUS_API_KEY_2`, `HELIUS_API_KEY_3` | Helius Solana holder/supply keys tried in order |
+| `SHYFT_API_KEY` | Solana RPC holder/supply provider, tried after Helius |
+| `QUICKNODE_SOLANA_RPC_URL` | Full QuickNode Solana mainnet RPC endpoint URL; holder scan fallback |
+| `ALCHEMY_SOLANA_API_KEY` | Alchemy Solana mainnet API key; paginated holder scan fallback |
 | `TWITTER_BEARER_TOKEN` | Optional X mention data for social activity |
 
 ### Bot Settings

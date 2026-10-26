@@ -7,7 +7,9 @@ trade signal generation, and manual token scan requests.
 """
 
 import asyncio
-from telegram import Update
+import csv
+import io
+from telegram import InputFile, Update
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
@@ -79,6 +81,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "\n"
         "Commands:\n"
         "/scan [ticker] - Scan a token for crime pump signals\n"
+        "/holders [mint] - Download the verified full Solana holder list as CSV\n"
         "/trade [ticker] - Full trade analysis with entry/SL/TP\n"
         "/analyze [ticker] - Alias for /trade\n"
         "/calc [ticker] [amount] [leverage] - Calculate profit/loss\n"
@@ -113,6 +116,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Detection:\n"
         "/scan [ticker] - Run a full crime pump analysis on a token. "
         "Evaluates all four detection layers and classifies the lifecycle stage.\n"
+        "/holders [mint] - Download every wallet and supply share as CSV when "
+        "the complete list reconciles to mint supply.\n"
         "\n"
         "Trading:\n"
         "/trade [ticker] - Generate a complete trade signal with direction, "
@@ -216,6 +221,74 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await processing_msg.edit_text(
             f"Error scanning ${query}: {str(e)[:200]}"
         )
+
+
+async def holders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Export every owner only when the Solana holder snapshot is verified."""
+    if not context.args:
+        await update.message.reply_text(
+            "Provide a Solana token mint address.\nExample: /holders <mint-address>"
+        )
+        return
+
+    if _data_pipeline is None or not getattr(_data_pipeline, "solscan", None):
+        await update.message.reply_text("The on-chain data service is not initialized.")
+        return
+
+    mint = context.args[0].strip()
+    status = await update.message.reply_text("Fetching and verifying the full holder list...")
+    try:
+        result = await _data_pipeline.solscan.get_token_holders(mint)
+        data = result.get("data", {}) if isinstance(result, dict) else {}
+        rows = data.get("items", []) if isinstance(data, dict) else []
+        if not isinstance(data, dict) or data.get("supply_reconciled") is not True:
+            await status.edit_text(
+                "A complete wallet list could not be verified for this mint. "
+                "No partial list is being labelled complete. Check provider limits or try again."
+            )
+            return
+        if not isinstance(rows, list) or not rows:
+            await status.edit_text("The provider verified supply, but returned no wallet rows.")
+            return
+        if any(not isinstance(row, dict) for row in rows):
+            await status.edit_text("Holder rows were malformed; no CSV was sent.")
+            return
+
+        output = io.StringIO(newline="")
+        writer = csv.writer(output)
+        writer.writerow(("rank", "token_account_owner_address", "raw_token_units", "supply_percent"))
+        try:
+            total_supply = sum(int(row["amount"]) for row in rows)
+        except (KeyError, TypeError, ValueError):
+            await status.edit_text("Holder rows were malformed; no CSV was sent.")
+            return
+        if total_supply <= 0:
+            await status.edit_text("Holder total was empty; no CSV was sent.")
+            return
+        for rank, row in enumerate(rows, 1):
+            if not isinstance(row, dict):
+                continue
+            try:
+                amount = int(row["amount"])
+                percentage = amount / total_supply * 100
+            except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                await status.edit_text("Holder rows were malformed; no CSV was sent.")
+                return
+            writer.writerow((rank, row.get("address", ""), amount, f"{percentage:.12f}"))
+
+        payload = io.BytesIO(output.getvalue().encode("utf-8"))
+        payload.name = f"quil-holders-{mint}.csv"
+        await update.message.reply_document(
+            document=InputFile(payload, filename=payload.name),
+            caption=(
+                f"Verified holder export: {len(rows):,} token-account owner addresses; balances reconcile "
+                f"to mint supply. Source: {result.get('provider', 'provider')}."
+            ),
+        )
+        await status.delete()
+    except Exception as e:
+        log.error("holder_export_error", mint=mint, error=type(e).__name__)
+        await status.edit_text("Could not produce the holder export. Check provider availability and logs.")
 
 
 async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

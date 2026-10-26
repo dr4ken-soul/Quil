@@ -19,6 +19,7 @@ from telegram_bot.handlers import (
     start_command,
     help_command,
     scan_command,
+    holders_command,
     trade_command,
     risk_command,
     track_command,
@@ -107,6 +108,7 @@ class QuilTelegramBot:
         self.app.add_handler(CommandHandler("start", start_command))
         self.app.add_handler(CommandHandler("help", help_command))
         self.app.add_handler(CommandHandler("scan", scan_command))
+        self.app.add_handler(CommandHandler("holders", holders_command))
         self.app.add_handler(CommandHandler("trade", trade_command))
         self.app.add_handler(CommandHandler("analyze", trade_command))
         self.app.add_handler(CommandHandler("risk", risk_command))
