@@ -19,6 +19,7 @@ from config.settings import (
     BSCSCAN_API_KEY,
     SOLSCAN_API_KEY,
     SOLSCAN_API_KEY_2,
+    SOLSCAN_API_KEY_3,
     HELIUS_API_KEY,
     HELIUS_API_KEY_2,
     HELIUS_API_KEY_3,
@@ -551,7 +552,7 @@ class SolscanClient:
         self.base_url = "https://pro-api.solscan.io/v2.0"
         self.api_key = SOLSCAN_API_KEY
         self.api_keys = tuple(dict.fromkeys(
-            key for key in (SOLSCAN_API_KEY, SOLSCAN_API_KEY_2) if key
+            key for key in (SOLSCAN_API_KEY, SOLSCAN_API_KEY_2, SOLSCAN_API_KEY_3) if key
         ))
         self.helius_api_key = HELIUS_API_KEY
         self.helius_api_keys = tuple(dict.fromkeys(
@@ -574,7 +575,7 @@ class SolscanClient:
         return self._client
 
     async def _request(self, endpoint: str, params: dict = None) -> Optional[dict]:
-        """Call Solscan, rotating to the second configured key on provider errors."""
+        """Call Solscan, rotating through configured keys on retryable provider errors."""
         if not self.api_keys:
             log.warning("solscan_no_key", message="No Solscan API key configured")
             return None
