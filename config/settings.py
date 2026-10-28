@@ -85,6 +85,9 @@ SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "30"))
 ALERT_COOLDOWN_MINUTES = int(os.getenv("ALERT_COOLDOWN_MINUTES", "15"))
 MIN_CONFIDENCE_ALERT = float(os.getenv("MIN_CONFIDENCE_ALERT", "0.5"))
 MIN_LAYERS_CONFIRMED = int(os.getenv("MIN_LAYERS_CONFIRMED", "2"))
+AUTONOMOUS_WATCH_ALERTS = os.getenv("AUTONOMOUS_WATCH_ALERTS", "false").strip().lower() in {
+    "1", "true", "yes", "on"
+}
 
 # ── Detection Thresholds ─────────────────────────────────────────────────────
 

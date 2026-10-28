@@ -10,7 +10,13 @@ import signal
 import sys
 from datetime import datetime, timedelta, timezone
 
-from config.settings import SCAN_INTERVAL_SECONDS, ALERT_COOLDOWN_MINUTES, PAPER_TRADING, PORTFOLIO_VALUE
+from config.settings import (
+    SCAN_INTERVAL_SECONDS,
+    ALERT_COOLDOWN_MINUTES,
+    AUTONOMOUS_WATCH_ALERTS,
+    PAPER_TRADING,
+    PORTFOLIO_VALUE,
+)
 from core.data_pipeline import DataPipeline
 from core.signal_aggregator import SignalAggregator
 from core.execution_engine import ExecutionEngine
@@ -101,7 +107,8 @@ class QuilBot:
         self._running = True
         self._scan_task = asyncio.create_task(self._autonomous_scan_loop())
         log.info("autonomous_scanner_started",
-                interval=f"{SCAN_INTERVAL_SECONDS}s")
+                interval=f"{SCAN_INTERVAL_SECONDS}s",
+                watch_alerts=AUTONOMOUS_WATCH_ALERTS)
 
         # Start position monitor (checks prices every 5 seconds)
         self.position_monitor._telegram = self.telegram
@@ -246,7 +253,9 @@ class QuilBot:
                         )
 
                         # Send alert if warranted
-                        if self.detector.should_send_alert(alert):
+                        if self.detector.should_send_alert(alert) and (
+                            alert.is_confirmed or AUTONOMOUS_WATCH_ALERTS
+                        ):
                             await self.telegram.send_alert(alert)
                             self._set_cooldown(symbol)
                             if alert.is_confirmed:
